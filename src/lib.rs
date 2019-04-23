@@ -35,7 +35,7 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
 
     let &second_byte = literal_bytes.get(1).ok_or(UnescapeCharError::LoneSlash)?;
 
-    let res = match second_byte {
+    let simple_escape = match second_byte {
         b'"' => '"',
         b'n' => '\n',
         b'r' => '\r',
@@ -43,6 +43,7 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
         b'\\' => '\\',
         b'\'' => '\'',
         b'0' => '\0',
+
         b'x' => {
             let hi = literal_bytes
                 .get(2)
@@ -56,17 +57,18 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
             if value > 0x7f {
                 return Err(UnescapeCharError::OutOfRangeHexEscape);
             }
-            value as char
+            if literal_bytes.len() > 4 {
+                return Err(UnescapeCharError::MoreThanOneChar);
+            }
+            return Ok(value as char);
         }
+
         b'u' => {
             if literal_bytes.get(2) != Some(&b'{') {
                 return Err(UnescapeCharError::InvalidUnicodeEscape);
             }
 
-            match literal_bytes
-                .get(3)
-                .ok_or(UnescapeCharError::UnclosedUnicodeEscape)?
-            {
+            match literal_bytes.get(3).ok_or(UnescapeCharError::UnclosedUnicodeEscape)? {
                 b'_' => return Err(UnescapeCharError::LeadingUnderscoreUnicodeEscape),
                 b'}' => return Err(UnescapeCharError::EmptyUnicodeEscape),
                 _ => (),
@@ -74,36 +76,47 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
 
             let mut value: u32 = 0;
             let mut no_closing_brace = Err(UnescapeCharError::UnclosedUnicodeEscape);
-            for (i, &byte) in literal_bytes[3..]
-                .iter()
-                .filter(|&&byte| byte != b'_')
-                .enumerate()
-            {
-                if byte == b'}' {
-                    no_closing_brace = Ok(());
-                    break;
-                }
-                if i == 6 {
-                    return Err(UnescapeCharError::OverlongUnicodeEscape);
-                }
+            let mut n_digits = 0;
+            for (i, &byte) in literal_bytes[3..].iter().enumerate() {
+                match byte {
+                    b'_' => continue,
+                    b'}' => {
+                        if i != literal_bytes[3..].len() - 1 {
+                            return Err(UnescapeCharError::MoreThanOneChar);
+                        }
+                        no_closing_brace = Ok(());
+                        break;
+                    }
+                    _ => {
+                        let digit =
+                            to_hex_digit(byte).ok_or(UnescapeCharError::InvalidUnicodeEscape)?;
+                        n_digits += 1;
+                        if n_digits > 6 {
+                            return Err(UnescapeCharError::OverlongUnicodeEscape);
+                        }
 
-                let digit = to_hex_digit(byte).ok_or(UnescapeCharError::InvalidUnicodeEscape)?;
-                let digit = digit as u32;
-                value = value.checked_mul(16).unwrap().checked_add(digit).unwrap();
+                        let digit = digit as u32;
+                        value = value.checked_mul(16).unwrap().checked_add(digit).unwrap();
+                    }
+                }
             }
             no_closing_brace?;
 
-            std::char::from_u32(value).ok_or_else(|| {
+            return std::char::from_u32(value).ok_or_else(|| {
                 if value > 0x10FFFF {
                     UnescapeCharError::OutOfRangeUnicodeEscape
                 } else {
                     UnescapeCharError::LoneSurrogateUnicodeEscape
                 }
-            })?
+            });
         }
         _ => return Err(UnescapeCharError::InvalidEscape),
     };
-    Ok(res)
+
+    if literal_bytes.len() > 2 {
+        return Err(UnescapeCharError::MoreThanOneChar);
+    }
+    Ok(simple_escape)
 }
 
 pub struct UnescapeStrErrorInfo {
@@ -158,8 +171,19 @@ mod tests {
         }
 
         check("", UnescapeCharError::ZeroChars);
+        check(r"\", UnescapeCharError::LoneSlash);
+
         check("spam", UnescapeCharError::MoreThanOneChar);
-        check("\\", UnescapeCharError::LoneSlash);
+        check(r"\x0ff", UnescapeCharError::MoreThanOneChar);
+        check(r#"\"a"#, UnescapeCharError::MoreThanOneChar);
+        check(r"\na", UnescapeCharError::MoreThanOneChar);
+        check(r"\ra", UnescapeCharError::MoreThanOneChar);
+        check(r"\ta", UnescapeCharError::MoreThanOneChar);
+        check(r"\\a", UnescapeCharError::MoreThanOneChar);
+        check(r"\'a", UnescapeCharError::MoreThanOneChar);
+        check(r"\0a", UnescapeCharError::MoreThanOneChar);
+        check(r"\u{0}x", UnescapeCharError::MoreThanOneChar);
+        check(r"\u{1F63b}}", UnescapeCharError::MoreThanOneChar);
 
         check(r"\v", UnescapeCharError::InvalidEscape);
         check(r"\💩", UnescapeCharError::InvalidEscape);
@@ -181,10 +205,7 @@ mod tests {
         check(r"\u{", UnescapeCharError::UnclosedUnicodeEscape);
         check(r"\u{0000", UnescapeCharError::UnclosedUnicodeEscape);
         check(r"\u{}", UnescapeCharError::EmptyUnicodeEscape);
-        check(
-            r"\u{_0000}",
-            UnescapeCharError::LeadingUnderscoreUnicodeEscape,
-        );
+        check(r"\u{_0000}", UnescapeCharError::LeadingUnderscoreUnicodeEscape);
         check(r"\u{0000000}", UnescapeCharError::OverlongUnicodeEscape);
         check(r"\u{FFFFFF}", UnescapeCharError::OutOfRangeUnicodeEscape);
         check(r"\u{ffffff}", UnescapeCharError::OutOfRangeUnicodeEscape);
