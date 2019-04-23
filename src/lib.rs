@@ -44,11 +44,15 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
         b'\'' => '\'',
         b'0' => '\0',
         b'x' => {
-            let code = literal_text
-                .get(2..4)
+            let hi = literal_bytes
+                .get(2)
+                .and_then(|&byte| to_hex_digit(byte))
                 .ok_or(UnescapeCharError::InvalidHexEscape)?;
-            let value =
-                u8::from_str_radix(code, 16).map_err(|_| UnescapeCharError::InvalidHexEscape)?;
+            let lo = literal_bytes
+                .get(3)
+                .and_then(|&byte| to_hex_digit(byte))
+                .ok_or(UnescapeCharError::InvalidHexEscape)?;
+            let value = hi.checked_mul(16).unwrap().checked_add(lo).unwrap();
             if value > 0x7f {
                 return Err(UnescapeCharError::OutOfRangeHexEscape);
             }
