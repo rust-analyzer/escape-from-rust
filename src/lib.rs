@@ -7,6 +7,7 @@ pub enum UnescapeCharError {
 
     LoneSlash,
     InvalidEscape,
+    EscapeOnlyChar,
 
     InvalidHexEscape,
     OutOfRangeHexEscape,
@@ -25,12 +26,17 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
     let &first_byte = literal_bytes.get(0).ok_or(UnescapeCharError::ZeroChars)?;
 
     if first_byte != b'\\' {
-        let mut chars = literal_text.chars();
-        let res = chars.next().unwrap();
-        if chars.next().is_some() {
-            return Err(UnescapeCharError::MoreThanOneChar);
-        }
-        return Ok(res);
+        return match first_byte {
+            b'\t' | b'\n' | b'\r' | b'\'' => Err(UnescapeCharError::EscapeOnlyChar),
+            _ => {
+                let mut chars = literal_text.chars();
+                let res = chars.next().unwrap();
+                if chars.next().is_some() {
+                    return Err(UnescapeCharError::MoreThanOneChar);
+                }
+                Ok(res)
+            }
+        };
     }
 
     let &second_byte = literal_bytes.get(1).ok_or(UnescapeCharError::LoneSlash)?;
@@ -172,6 +178,11 @@ mod tests {
 
         check("", UnescapeCharError::ZeroChars);
         check(r"\", UnescapeCharError::LoneSlash);
+
+        check("\n", UnescapeCharError::EscapeOnlyChar);
+        check("\r\n", UnescapeCharError::EscapeOnlyChar);
+        check("'", UnescapeCharError::EscapeOnlyChar);
+        check("\t", UnescapeCharError::EscapeOnlyChar);
 
         check("spam", UnescapeCharError::MoreThanOneChar);
         check(r"\x0ff", UnescapeCharError::MoreThanOneChar);
