@@ -25,103 +25,11 @@ pub enum UnescapeCharError {
 
 pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
     let mut chars = literal_text.chars();
-    let first_char = chars.next().ok_or(UnescapeCharError::ZeroChars)?;
-
-    if first_char != '\\' {
-        return match first_char {
-            '\t' | '\n' | '\r' | '\'' => Err(UnescapeCharError::EscapeOnlyChar),
-            _ => {
-                if chars.next().is_some() {
-                    return Err(UnescapeCharError::MoreThanOneChar);
-                }
-                Ok(first_char)
-            }
-        };
-    }
-
-    let second_char = chars.next().ok_or(UnescapeCharError::LoneSlash)?;
-
-    let simple_escape = match second_char {
-        '"' => '"',
-        'n' => '\n',
-        'r' => '\r',
-        't' => '\t',
-        '\\' => '\\',
-        '\'' => '\'',
-        '0' => '\0',
-
-        'x' => {
-            let hi = chars
-                .next()
-                .and_then(|c| c.to_digit(16))
-                .ok_or(UnescapeCharError::InvalidHexEscape)?;
-            let lo = chars
-                .next()
-                .and_then(|c| c.to_digit(16))
-                .ok_or(UnescapeCharError::InvalidHexEscape)?;
-            let value = hi.checked_mul(16).unwrap().checked_add(lo).unwrap();
-
-            if value > 0x7f {
-                return Err(UnescapeCharError::OutOfRangeHexEscape);
-            }
-            let value = value as u8;
-
-            if chars.next().is_some() {
-                return Err(UnescapeCharError::MoreThanOneChar);
-            }
-            return Ok(value as char);
-        }
-
-        'u' => {
-            if chars.next() != Some('{') {
-                return Err(UnescapeCharError::InvalidUnicodeEscape);
-            }
-
-            let mut n_digits = 1;
-            let mut value: u32 =
-                match chars.next().ok_or(UnescapeCharError::UnclosedUnicodeEscape)? {
-                    '_' => return Err(UnescapeCharError::LeadingUnderscoreUnicodeEscape),
-                    '}' => return Err(UnescapeCharError::EmptyUnicodeEscape),
-                    c => c.to_digit(16).ok_or(UnescapeCharError::InvalidUnicodeEscape)?,
-                };
-
-            loop {
-                match chars.next() {
-                    None => return Err(UnescapeCharError::UnclosedUnicodeEscape),
-                    Some('_') => continue,
-                    Some('}') => {
-                        if chars.next().is_some() {
-                            return Err(UnescapeCharError::MoreThanOneChar);
-                        }
-                        return std::char::from_u32(value).ok_or_else(|| {
-                            if value > 0x10FFFF {
-                                UnescapeCharError::OutOfRangeUnicodeEscape
-                            } else {
-                                UnescapeCharError::LoneSurrogateUnicodeEscape
-                            }
-                        });
-                    }
-                    Some(c) => {
-                        let digit =
-                            c.to_digit(16).ok_or(UnescapeCharError::InvalidUnicodeEscape)?;
-                        n_digits += 1;
-                        if n_digits > 6 {
-                            return Err(UnescapeCharError::OverlongUnicodeEscape);
-                        }
-
-                        let digit = digit as u32;
-                        value = value.checked_mul(16).unwrap().checked_add(digit).unwrap();
-                    }
-                };
-            }
-        }
-        _ => return Err(UnescapeCharError::InvalidEscape),
-    };
-
+    let res = scan_char_escape(&mut chars)?;
     if chars.next().is_some() {
         return Err(UnescapeCharError::MoreThanOneChar);
     }
-    Ok(simple_escape)
+    Ok(res)
 }
 
 pub struct UnescapeStrErrorInfo {
@@ -168,7 +76,88 @@ where
 }
 
 fn scan_char_escape(chars: &mut Chars) -> Result<char, UnescapeCharError> {
-    Ok('x')
+    let first_char = chars.next().ok_or(UnescapeCharError::ZeroChars)?;
+
+    if first_char != '\\' {
+        return match first_char {
+            '\t' | '\n' | '\r' | '\'' => Err(UnescapeCharError::EscapeOnlyChar),
+            _ => Ok(first_char),
+        };
+    }
+
+    let second_char = chars.next().ok_or(UnescapeCharError::LoneSlash)?;
+
+    let res = match second_char {
+        '"' => '"',
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        '\\' => '\\',
+        '\'' => '\'',
+        '0' => '\0',
+
+        'x' => {
+            let hi = chars
+                .next()
+                .and_then(|c| c.to_digit(16))
+                .ok_or(UnescapeCharError::InvalidHexEscape)?;
+            let lo = chars
+                .next()
+                .and_then(|c| c.to_digit(16))
+                .ok_or(UnescapeCharError::InvalidHexEscape)?;
+            let value = hi.checked_mul(16).unwrap().checked_add(lo).unwrap();
+
+            if value > 0x7f {
+                return Err(UnescapeCharError::OutOfRangeHexEscape);
+            }
+            let value = value as u8;
+
+            value as char
+        }
+
+        'u' => {
+            if chars.next() != Some('{') {
+                return Err(UnescapeCharError::InvalidUnicodeEscape);
+            }
+
+            let mut n_digits = 1;
+            let mut value: u32 =
+                match chars.next().ok_or(UnescapeCharError::UnclosedUnicodeEscape)? {
+                    '_' => return Err(UnescapeCharError::LeadingUnderscoreUnicodeEscape),
+                    '}' => return Err(UnescapeCharError::EmptyUnicodeEscape),
+                    c => c.to_digit(16).ok_or(UnescapeCharError::InvalidUnicodeEscape)?,
+                };
+
+            loop {
+                match chars.next() {
+                    None => return Err(UnescapeCharError::UnclosedUnicodeEscape),
+                    Some('_') => continue,
+                    Some('}') => {
+                        break std::char::from_u32(value).ok_or_else(|| {
+                            if value > 0x10FFFF {
+                                UnescapeCharError::OutOfRangeUnicodeEscape
+                            } else {
+                                UnescapeCharError::LoneSurrogateUnicodeEscape
+                            }
+                        })?;
+                    }
+                    Some(c) => {
+                        let digit =
+                            c.to_digit(16).ok_or(UnescapeCharError::InvalidUnicodeEscape)?;
+                        n_digits += 1;
+                        if n_digits > 6 {
+                            return Err(UnescapeCharError::OverlongUnicodeEscape);
+                        }
+
+                        let digit = digit as u32;
+                        value = value.checked_mul(16).unwrap().checked_add(digit).unwrap();
+                    }
+                };
+            }
+        }
+        _ => return Err(UnescapeCharError::InvalidEscape),
+    };
+    Ok(res)
 }
 
 /*
