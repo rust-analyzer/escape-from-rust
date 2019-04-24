@@ -1,5 +1,7 @@
 //! Utilities for turning string and char literals into values they represent.
 
+use std::str::Chars;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum UnescapeCharError {
     ZeroChars,
@@ -126,16 +128,122 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
 }
 
 pub struct UnescapeStrErrorInfo {
-    _src_pos: usize,
-    _error: UnescapeCharError,
+    src_pos: usize,
+    error: UnescapeCharError,
 }
 
-pub fn unescape_str<F>(_src: &str, _buf: &mut String, _on_error: &mut F)
+pub fn unescape_str<F>(src: &str, buf: &mut String, on_error: &mut F)
 where
     F: FnMut(&mut String, UnescapeStrErrorInfo),
 {
+    let initial_len = src.len();
+    let mut chars = src.chars();
+    loop {
+        if chars.as_str().starts_with("\\\n") {
+            chars.next();
+            chars.next();
+            skip_ascii_whitespace(&mut chars);
+            continue;
+        }
+        if chars.as_str().starts_with("\\\r\n") {
+            chars.next();
+            skip_ascii_whitespace(&mut chars);
+            continue;
+        }
+        match scan_char_escape(&mut chars) {
+            Ok(c) => buf.push(c),
+            Err(error) => {
+                let err_info =
+                    UnescapeStrErrorInfo { src_pos: initial_len - chars.as_str().len(), error };
+                on_error(buf, err_info)
+            }
+        }
+    }
 
+    fn skip_ascii_whitespace(chars: &mut Chars) {
+        let str = chars.as_str();
+        let first_non_space = str
+            .bytes()
+            .position(|b| b != b' ' && b != b'\t' && b != b'\n' && b != b'\r')
+            .unwrap_or(str.len());
+        *chars = str[first_non_space..].chars()
+    }
 }
+
+fn scan_char_escape(chars: &mut Chars) -> Result<char, UnescapeCharError> {
+    Ok('x')
+}
+
+/*
+/// Parses a string representing a string literal into its final form. Does unescaping.
+pub fn str_lit(lit: &str, diag: Option<(Span, &Handler)>) -> String {
+    debug!("str_lit: given {}", lit.escape_default());
+    let mut res = String::with_capacity(lit.len());
+
+    let error = |i| format!("lexer should have rejected {} at {}", lit, i);
+
+    /// Eat everything up to a non-whitespace.
+    fn eat<'a>(it: &mut iter::Peekable<str::CharIndices<'a>>) {
+        loop {
+            match it.peek().map(|x| x.1) {
+                Some(' ') | Some('\n') | Some('\r') | Some('\t') => {
+                    it.next();
+                },
+                _ => { break; }
+            }
+        }
+    }
+
+    let mut chars = lit.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' => {
+                let ch = chars.peek().unwrap_or_else(|| {
+                    panic!("{}", error(i))
+                }).1;
+
+                if ch == '\n' {
+                    eat(&mut chars);
+                } else if ch == '\r' {
+                    chars.next();
+                    let ch = chars.peek().unwrap_or_else(|| {
+                        panic!("{}", error(i))
+                    }).1;
+
+                    if ch != '\n' {
+                        panic!("lexer accepted bare CR");
+                    }
+                    eat(&mut chars);
+                } else {
+                    // otherwise, a normal escape
+                    let (c, n) = char_lit(&lit[i..], diag);
+                    for _ in 0..n - 1 { // we don't need to move past the first \
+                        chars.next();
+                    }
+                    res.push(c);
+                }
+            },
+            '\r' => {
+                let ch = chars.peek().unwrap_or_else(|| {
+                    panic!("{}", error(i))
+                }).1;
+
+                if ch != '\n' {
+                    panic!("lexer accepted bare CR");
+                }
+                chars.next();
+                res.push('\n');
+            }
+            c => res.push(c),
+        }
+    }
+
+    res.shrink_to_fit(); // probably not going to do anything, unless there was an escape.
+    debug!("parse_str_lit: returning {}", res);
+    res
+}
+
+*/
 
 pub enum UnescapeByteError {}
 
