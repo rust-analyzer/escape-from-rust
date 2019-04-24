@@ -10,6 +10,7 @@ pub enum UnescapeCharError {
 
     LoneSlash,
     InvalidEscape,
+    BareCarriageReturn,
     EscapeOnlyChar,
 
     InvalidHexEscape,
@@ -54,7 +55,7 @@ where
         let start = chars.as_str().len() - initial_len;
         let res = scan_char_escape(&mut chars);
         let end = chars.as_str().len() - initial_len;
-        callback(start .. end, res);
+        callback(start..end, res);
     }
 
     fn skip_ascii_whitespace(chars: &mut Chars) {
@@ -72,7 +73,12 @@ fn scan_char_escape(chars: &mut Chars) -> Result<char, UnescapeCharError> {
 
     if first_char != '\\' {
         return match first_char {
-            '\t' | '\n' | '\r' | '\'' => Err(UnescapeCharError::EscapeOnlyChar),
+            '\t' | '\n' | '\'' => Err(UnescapeCharError::EscapeOnlyChar),
+            '\r' => Err(if chars.clone().next() == Some('\n') {
+                UnescapeCharError::EscapeOnlyChar
+            } else {
+                UnescapeCharError::BareCarriageReturn
+            }),
             _ => Ok(first_char),
         };
     }
@@ -241,7 +247,6 @@ where
 
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +265,7 @@ mod tests {
         check("\r\n", UnescapeCharError::EscapeOnlyChar);
         check("'", UnescapeCharError::EscapeOnlyChar);
         check("\t", UnescapeCharError::EscapeOnlyChar);
+        check("\r", UnescapeCharError::BareCarriageReturn);
 
         check("spam", UnescapeCharError::MoreThanOneChar);
         check(r"\x0ff", UnescapeCharError::MoreThanOneChar);
