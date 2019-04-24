@@ -1,6 +1,7 @@
 //! Utilities for turning string and char literals into values they represent.
 
 use std::str::Chars;
+use std::ops::Range;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum UnescapeCharError {
@@ -32,14 +33,9 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
     Ok(res)
 }
 
-pub struct UnescapeStrErrorInfo {
-    src_pos: usize,
-    error: UnescapeCharError,
-}
-
-pub fn unescape_str<F>(src: &str, buf: &mut String, on_error: &mut F)
+pub fn unescape_str<F>(src: &str, callback: &mut F)
 where
-    F: FnMut(&mut String, UnescapeStrErrorInfo),
+    F: FnMut(Range<usize>, Result<char, UnescapeCharError>),
 {
     let initial_len = src.len();
     let mut chars = src.chars();
@@ -55,14 +51,10 @@ where
             skip_ascii_whitespace(&mut chars);
             continue;
         }
-        match scan_char_escape(&mut chars) {
-            Ok(c) => buf.push(c),
-            Err(error) => {
-                let err_info =
-                    UnescapeStrErrorInfo { src_pos: initial_len - chars.as_str().len(), error };
-                on_error(buf, err_info)
-            }
-        }
+        let start = chars.as_str().len() - initial_len;
+        let res = scan_char_escape(&mut chars);
+        let end = chars.as_str().len() - initial_len;
+        callback(start .. end, res);
     }
 
     fn skip_ascii_whitespace(chars: &mut Chars) {
@@ -249,15 +241,6 @@ where
 
 }
 
-fn to_hex_digit(byte: u8) -> Option<u8> {
-    let res = match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => 10 + byte - b'a',
-        b'A'..=b'F' => 10 + byte - b'A',
-        _ => return None,
-    };
-    Some(res)
-}
 
 #[cfg(test)]
 mod tests {
