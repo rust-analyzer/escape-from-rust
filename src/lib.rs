@@ -40,22 +40,29 @@ where
 {
     let initial_len = src.len();
     let mut chars = src.chars();
-    loop {
-        if chars.as_str().starts_with("\\\n") {
+    while !chars.as_str().is_empty()  {
+        let start = initial_len - chars.as_str().len();
+        let c = if chars.as_str().starts_with("\n") {
+            chars.next();
+            Ok('\n')
+        } else if chars.as_str().starts_with("\r\n") {
+            chars.next();
+            chars.next();
+            Ok('\n')
+        } else if chars.as_str().starts_with("\\\n") {
             chars.next();
             chars.next();
             skip_ascii_whitespace(&mut chars);
             continue;
-        }
-        if chars.as_str().starts_with("\\\r\n") {
+        } else if chars.as_str().starts_with("\\\r\n") {
             chars.next();
             skip_ascii_whitespace(&mut chars);
             continue;
-        }
-        let start = chars.as_str().len() - initial_len;
-        let res = scan_char_escape(&mut chars);
-        let end = chars.as_str().len() - initial_len;
-        callback(start..end, res);
+        } else {
+            scan_char_escape(&mut chars)
+        };
+        let end = initial_len - chars.as_str().len();
+        callback(start..end, c);
     }
 
     fn skip_ascii_whitespace(chars: &mut Chars) {
@@ -157,77 +164,6 @@ fn scan_char_escape(chars: &mut Chars) -> Result<char, UnescapeCharError> {
     };
     Ok(res)
 }
-
-/*
-/// Parses a string representing a string literal into its final form. Does unescaping.
-pub fn str_lit(lit: &str, diag: Option<(Span, &Handler)>) -> String {
-    debug!("str_lit: given {}", lit.escape_default());
-    let mut res = String::with_capacity(lit.len());
-
-    let error = |i| format!("lexer should have rejected {} at {}", lit, i);
-
-    /// Eat everything up to a non-whitespace.
-    fn eat<'a>(it: &mut iter::Peekable<str::CharIndices<'a>>) {
-        loop {
-            match it.peek().map(|x| x.1) {
-                Some(' ') | Some('\n') | Some('\r') | Some('\t') => {
-                    it.next();
-                },
-                _ => { break; }
-            }
-        }
-    }
-
-    let mut chars = lit.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        match c {
-            '\\' => {
-                let ch = chars.peek().unwrap_or_else(|| {
-                    panic!("{}", error(i))
-                }).1;
-
-                if ch == '\n' {
-                    eat(&mut chars);
-                } else if ch == '\r' {
-                    chars.next();
-                    let ch = chars.peek().unwrap_or_else(|| {
-                        panic!("{}", error(i))
-                    }).1;
-
-                    if ch != '\n' {
-                        panic!("lexer accepted bare CR");
-                    }
-                    eat(&mut chars);
-                } else {
-                    // otherwise, a normal escape
-                    let (c, n) = char_lit(&lit[i..], diag);
-                    for _ in 0..n - 1 { // we don't need to move past the first \
-                        chars.next();
-                    }
-                    res.push(c);
-                }
-            },
-            '\r' => {
-                let ch = chars.peek().unwrap_or_else(|| {
-                    panic!("{}", error(i))
-                }).1;
-
-                if ch != '\n' {
-                    panic!("lexer accepted bare CR");
-                }
-                chars.next();
-                res.push('\n');
-            }
-            c => res.push(c),
-        }
-    }
-
-    res.shrink_to_fit(); // probably not going to do anything, unless there was an escape.
-    debug!("parse_str_lit: returning {}", res);
-    res
-}
-
-*/
 
 pub enum UnescapeByteError {}
 
@@ -345,5 +281,28 @@ mod tests {
         check(r"\u{00_41}", 'A');
         check(r"\u{4__1__}", 'A');
         check(r"\u{1F63b}", '😻');
+    }
+
+    #[test]
+    fn test_unescape_str_good() {
+        fn check(literal_text: &str, expected: &str) {
+            let mut buf = Ok(String::with_capacity(literal_text.len()));
+            unescape_str(literal_text, &mut |range, c| {
+                if let Ok(b) = &mut buf {
+                    match c {
+                        Ok(c) => b.push(c),
+                        Err(e) => buf = Err((range, e)),
+                    }
+                }
+            });
+            let buf = buf.as_ref().map(|it| it.as_ref());
+            assert_eq!(buf, Ok(expected))
+        }
+
+        check("foo", "foo");
+        check("", "");
+        check(" \n", " \n");
+
+        check("hello \\\n     world", "hello world");
     }
 }
