@@ -24,80 +24,86 @@ pub enum UnescapeCharError {
 }
 
 pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
-    let literal_bytes = literal_text.as_bytes();
-    let &first_byte = literal_bytes.get(0).ok_or(UnescapeCharError::ZeroChars)?;
+    let mut chars = literal_text.chars();
+    let first_char = chars.next().ok_or(UnescapeCharError::ZeroChars)?;
 
-    if first_byte != b'\\' {
-        return match first_byte {
-            b'\t' | b'\n' | b'\r' | b'\'' => Err(UnescapeCharError::EscapeOnlyChar),
+    if first_char != '\\' {
+        return match first_char {
+            '\t' | '\n' | '\r' | '\'' => Err(UnescapeCharError::EscapeOnlyChar),
             _ => {
-                let mut chars = literal_text.chars();
-                let res = chars.next().unwrap();
                 if chars.next().is_some() {
                     return Err(UnescapeCharError::MoreThanOneChar);
                 }
-                Ok(res)
+                Ok(first_char)
             }
         };
     }
 
-    let &second_byte = literal_bytes.get(1).ok_or(UnescapeCharError::LoneSlash)?;
+    let second_char = chars.next().ok_or(UnescapeCharError::LoneSlash)?;
 
-    let simple_escape = match second_byte {
-        b'"' => '"',
-        b'n' => '\n',
-        b'r' => '\r',
-        b't' => '\t',
-        b'\\' => '\\',
-        b'\'' => '\'',
-        b'0' => '\0',
+    let simple_escape = match second_char {
+        '"' => '"',
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        '\\' => '\\',
+        '\'' => '\'',
+        '0' => '\0',
 
-        b'x' => {
-            let hi = literal_bytes
-                .get(2)
-                .and_then(|&byte| to_hex_digit(byte))
+        'x' => {
+            let hi = chars
+                .next()
+                .and_then(|c| c.to_digit(16))
                 .ok_or(UnescapeCharError::InvalidHexEscape)?;
-            let lo = literal_bytes
-                .get(3)
-                .and_then(|&byte| to_hex_digit(byte))
+            let lo = chars
+                .next()
+                .and_then(|c| c.to_digit(16))
                 .ok_or(UnescapeCharError::InvalidHexEscape)?;
             let value = hi.checked_mul(16).unwrap().checked_add(lo).unwrap();
+
             if value > 0x7f {
                 return Err(UnescapeCharError::OutOfRangeHexEscape);
             }
-            if literal_bytes.len() > 4 {
+            let value = value as u8;
+
+            if chars.next().is_some() {
                 return Err(UnescapeCharError::MoreThanOneChar);
             }
             return Ok(value as char);
         }
 
-        b'u' => {
-            if literal_bytes.get(2) != Some(&b'{') {
+        'u' => {
+            if chars.next() != Some('{') {
                 return Err(UnescapeCharError::InvalidUnicodeEscape);
             }
 
-            match literal_bytes.get(3).ok_or(UnescapeCharError::UnclosedUnicodeEscape)? {
-                b'_' => return Err(UnescapeCharError::LeadingUnderscoreUnicodeEscape),
-                b'}' => return Err(UnescapeCharError::EmptyUnicodeEscape),
-                _ => (),
-            }
+            let mut n_digits = 1;
+            let mut value: u32 =
+                match chars.next().ok_or(UnescapeCharError::UnclosedUnicodeEscape)? {
+                    '_' => return Err(UnescapeCharError::LeadingUnderscoreUnicodeEscape),
+                    '}' => return Err(UnescapeCharError::EmptyUnicodeEscape),
+                    c => c.to_digit(16).ok_or(UnescapeCharError::InvalidUnicodeEscape)?,
+                };
 
-            let mut value: u32 = 0;
-            let mut no_closing_brace = Err(UnescapeCharError::UnclosedUnicodeEscape);
-            let mut n_digits = 0;
-            for (i, &byte) in literal_bytes[3..].iter().enumerate() {
-                match byte {
-                    b'_' => continue,
-                    b'}' => {
-                        if i != literal_bytes[3..].len() - 1 {
+            loop {
+                match chars.next() {
+                    None => return Err(UnescapeCharError::UnclosedUnicodeEscape),
+                    Some('_') => continue,
+                    Some('}') => {
+                        if chars.next().is_some() {
                             return Err(UnescapeCharError::MoreThanOneChar);
                         }
-                        no_closing_brace = Ok(());
-                        break;
+                        return std::char::from_u32(value).ok_or_else(|| {
+                            if value > 0x10FFFF {
+                                UnescapeCharError::OutOfRangeUnicodeEscape
+                            } else {
+                                UnescapeCharError::LoneSurrogateUnicodeEscape
+                            }
+                        });
                     }
-                    _ => {
+                    Some(c) => {
                         let digit =
-                            to_hex_digit(byte).ok_or(UnescapeCharError::InvalidUnicodeEscape)?;
+                            c.to_digit(16).ok_or(UnescapeCharError::InvalidUnicodeEscape)?;
                         n_digits += 1;
                         if n_digits > 6 {
                             return Err(UnescapeCharError::OverlongUnicodeEscape);
@@ -106,22 +112,13 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
                         let digit = digit as u32;
                         value = value.checked_mul(16).unwrap().checked_add(digit).unwrap();
                     }
-                }
+                };
             }
-            no_closing_brace?;
-
-            return std::char::from_u32(value).ok_or_else(|| {
-                if value > 0x10FFFF {
-                    UnescapeCharError::OutOfRangeUnicodeEscape
-                } else {
-                    UnescapeCharError::LoneSurrogateUnicodeEscape
-                }
-            });
         }
         _ => return Err(UnescapeCharError::InvalidEscape),
     };
 
-    if literal_bytes.len() > 2 {
+    if chars.next().is_some() {
         return Err(UnescapeCharError::MoreThanOneChar);
     }
     Ok(simple_escape)
