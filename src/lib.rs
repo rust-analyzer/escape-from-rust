@@ -40,29 +40,27 @@ where
 {
     let initial_len = src.len();
     let mut chars = src.chars();
-    while !chars.as_str().is_empty()  {
-        let start = initial_len - chars.as_str().len();
-        let c = if chars.as_str().starts_with("\n") {
-            chars.next();
-            Ok('\n')
-        } else if chars.as_str().starts_with("\r\n") {
-            chars.next();
-            chars.next();
-            Ok('\n')
-        } else if chars.as_str().starts_with("\\\n") {
-            chars.next();
-            chars.next();
-            skip_ascii_whitespace(&mut chars);
-            continue;
-        } else if chars.as_str().starts_with("\\\r\n") {
-            chars.next();
-            skip_ascii_whitespace(&mut chars);
-            continue;
-        } else {
-            scan_char_escape(&mut chars)
+    while let Some(first_char) = chars.next() {
+        let start = initial_len - chars.as_str().len() - first_char.len_utf8();
+        let escaped_char = match first_char {
+            '\\' => {
+                let (second_char, third_char) = {
+                    let mut chars = chars.clone();
+                    (chars.next(), chars.next())
+                };
+                match (second_char, third_char) {
+                    (Some('\n'), _) | (Some('\r'), Some('\n')) => {
+                        skip_ascii_whitespace(&mut chars);
+                        continue;
+                    }
+                    _ => scan_char_escape_with_first_char(first_char, &mut chars),
+                }
+            }
+            '\n' => Ok('\n'),
+            _ => scan_char_escape_with_first_char(first_char, &mut chars),
         };
         let end = initial_len - chars.as_str().len();
-        callback(start..end, c);
+        callback(start..end, escaped_char);
     }
 
     fn skip_ascii_whitespace(chars: &mut Chars) {
@@ -77,7 +75,13 @@ where
 
 fn scan_char_escape(chars: &mut Chars) -> Result<char, UnescapeCharError> {
     let first_char = chars.next().ok_or(UnescapeCharError::ZeroChars)?;
+    scan_char_escape_with_first_char(first_char, chars)
+}
 
+fn scan_char_escape_with_first_char(
+    first_char: char,
+    chars: &mut Chars,
+) -> Result<char, UnescapeCharError> {
     if first_char != '\\' {
         return match first_char {
             '\t' | '\n' | '\'' => Err(UnescapeCharError::EscapeOnlyChar),
