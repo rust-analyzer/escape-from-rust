@@ -29,7 +29,7 @@ pub enum UnescapeCharError {
 pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
     let mut chars = literal_text.chars();
     let first_char = chars.next().ok_or(UnescapeCharError::ZeroChars)?;
-    let res = scan_char_escape(first_char, &mut chars)?;
+    let res = scan_char_escape(first_char, &mut chars, '\'')?;
     if chars.next().is_some() {
         return Err(UnescapeCharError::MoreThanOneChar);
     }
@@ -55,7 +55,7 @@ where
                         skip_ascii_whitespace(&mut chars);
                         continue;
                     }
-                    _ => scan_char_escape(first_char, &mut chars),
+                    _ => scan_char_escape(first_char, &mut chars, '"'),
                 }
             }
             '\n' => Ok('\n'),
@@ -65,10 +65,10 @@ where
                     chars.next();
                     Ok('\n')
                 } else {
-                    scan_char_escape(first_char, &mut chars)
+                    scan_char_escape(first_char, &mut chars, '"')
                 }
             }
-            _ => scan_char_escape(first_char, &mut chars),
+            _ => scan_char_escape(first_char, &mut chars, '"'),
         };
         let end = initial_len - chars.as_str().len();
         callback(start..end, escaped_char);
@@ -87,6 +87,7 @@ where
 fn scan_char_escape(
     first_char: char,
     chars: &mut Chars<'_>,
+    quote: char,
 ) -> Result<char, UnescapeCharError> {
     if first_char != '\\' {
         return match first_char {
@@ -96,6 +97,8 @@ fn scan_char_escape(
             } else {
                 UnescapeCharError::BareCarriageReturn
             }),
+            '\'' if quote == '\'' => Err(UnescapeCharError::EscapeOnlyChar),
+            '"' if quote == '"' => Err(UnescapeCharError::EscapeOnlyChar),
             _ => Ok(first_char),
         };
     }
@@ -192,6 +195,7 @@ mod tests {
         check("\n", UnescapeCharError::EscapeOnlyChar);
         check("\r\n", UnescapeCharError::EscapeOnlyChar);
         check("\t", UnescapeCharError::EscapeOnlyChar);
+        check("'", UnescapeCharError::EscapeOnlyChar);
         check("\r", UnescapeCharError::BareCarriageReturn);
 
         check("spam", UnescapeCharError::MoreThanOneChar);
@@ -251,7 +255,6 @@ mod tests {
         check("a", 'a');
         check("ы", 'ы');
         check("🦀", '🦀');
-        check("'", '\'');
 
         check(r#"\""#, '"');
         check(r"\n", '\n');
