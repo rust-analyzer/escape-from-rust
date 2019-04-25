@@ -1,11 +1,11 @@
-#![allow(unused)]
-//! Utilities for turning string and char literals into values they represent.
+//! Utilities for validating  string and char literals and turning them into
+//! values they represent.
 
 use std::str::Chars;
 use std::ops::Range;
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum UnescapeCharError {
+pub(crate) enum UnescapeCharError {
     ZeroChars,
     MoreThanOneChar,
 
@@ -26,7 +26,9 @@ pub enum UnescapeCharError {
     OutOfRangeUnicodeEscape,
 }
 
-pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
+/// Takes a contents of a char literal (without quotes), and returns an
+/// unescaped char or an error
+pub(crate) fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
     let mut chars = literal_text.chars();
     let first_char = chars.next().ok_or(UnescapeCharError::ZeroChars)?;
     let res = scan_char_escape(first_char, &mut chars, '\'')?;
@@ -36,7 +38,9 @@ pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
     Ok(res)
 }
 
-pub fn unescape_str<F>(src: &str, callback: &mut F)
+/// Takes a contents of a string literal (without quotes) and produces a
+/// sequence of escaped characters or errors.
+pub(crate) fn unescape_str<F>(src: &str, callback: &mut F)
 where
     F: FnMut(Range<usize>, Result<char, UnescapeCharError>),
 {
@@ -212,6 +216,7 @@ mod tests {
 
         check(r"\v", UnescapeCharError::InvalidEscape);
         check(r"\💩", UnescapeCharError::InvalidEscape);
+        check(r"\●",  UnescapeCharError::InvalidEscape);
 
         check(r"\x", UnescapeCharError::InvalidHexEscape);
         check(r"\x0", UnescapeCharError::InvalidHexEscape);
