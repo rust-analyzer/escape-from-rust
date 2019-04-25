@@ -43,53 +43,11 @@ pub(crate) fn unescape_char(literal_text: &str) -> Result<char, EscapeError> {
 
 /// Takes a contents of a string literal (without quotes) and produces a
 /// sequence of escaped characters or errors.
-pub(crate) fn unescape_str<F>(src: &str, callback: &mut F)
+pub(crate) fn unescape_str<F>(literal_text: &str, callback: &mut F)
 where
     F: FnMut(Range<usize>, Result<char, EscapeError>),
 {
-    let initial_len = src.len();
-    let mut chars = src.chars();
-    while let Some(first_char) = chars.next() {
-        let start = initial_len - chars.as_str().len() - first_char.len_utf8();
-
-        let escaped_char = match first_char {
-            '\\' => {
-                let (second_char, third_char) = {
-                    let mut chars = chars.clone();
-                    (chars.next(), chars.next())
-                };
-                match (second_char, third_char) {
-                    (Some('\n'), _) | (Some('\r'), Some('\n')) => {
-                        skip_ascii_whitespace(&mut chars);
-                        continue;
-                    }
-                    _ => scan_escape(first_char, &mut chars, Mode::Str),
-                }
-            }
-            '\n' => Ok('\n'),
-            '\r' => {
-                let second_char = chars.clone().next();
-                if second_char == Some('\n') {
-                    chars.next();
-                    Ok('\n')
-                } else {
-                    scan_escape(first_char, &mut chars, Mode::Str)
-                }
-            }
-            _ => scan_escape(first_char, &mut chars, Mode::Str),
-        };
-        let end = initial_len - chars.as_str().len();
-        callback(start..end, escaped_char);
-    }
-
-    fn skip_ascii_whitespace(chars: &mut Chars<'_>) {
-        let str = chars.as_str();
-        let first_non_space = str
-            .bytes()
-            .position(|b| b != b' ' && b != b'\t' && b != b'\n' && b != b'\r')
-            .unwrap_or(str.len());
-        *chars = str[first_non_space..].chars()
-    }
+    unescape_str_or_byte_str(literal_text, Mode::Str, callback)
 }
 
 pub(crate) fn unescape_byte(literal_text: &str) -> Result<u8, EscapeError> {
@@ -99,12 +57,25 @@ pub(crate) fn unescape_byte(literal_text: &str) -> Result<u8, EscapeError> {
     if chars.next().is_some() {
         return Err(EscapeError::MoreThanOneChar);
     }
-    let res = res as u32;
-    assert!(res <= u8::max_value() as u32, "guaranteed because of Mode::Byte");
-    let res = res as u8;
-    Ok(res)
+    Ok(byte_from_char(res))
 }
 
+/// Takes a contents of a string literal (without quotes) and produces a
+/// sequence of escaped characters or errors.
+pub(crate) fn unescape_byte_str<F>(literal_text: &str, callback: &mut F)
+where
+    F: FnMut(Range<usize>, Result<u8, EscapeError>),
+{
+    unescape_str_or_byte_str(literal_text, Mode::Str, &mut |range, char| {
+        callback(range, char.map(byte_from_char))
+    })
+}
+
+fn byte_from_char(c: char) -> u8 {
+    let res = c as u32;
+    assert!(res <= u8::max_value() as u32, "guaranteed because of Mode::Byte");
+    res as u8
+}
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -135,11 +106,7 @@ impl Mode {
     }
 }
 
-fn scan_escape(
-    first_char: char,
-    chars: &mut Chars<'_>,
-    mode: Mode,
-) -> Result<char, EscapeError> {
+fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<char, EscapeError> {
     if first_char != '\\' {
         return match first_char {
             '\t' | '\n' => Err(EscapeError::EscapeOnlyChar),
@@ -155,7 +122,7 @@ fn scan_escape(
                     return Err(EscapeError::NonAsciiCharInByte);
                 }
                 Ok(first_char)
-            },
+            }
         };
     }
 
@@ -171,14 +138,10 @@ fn scan_escape(
         '0' => '\0',
 
         'x' => {
-            let hi = chars
-                .next()
-                .and_then(|c| c.to_digit(16))
-                .ok_or(EscapeError::InvalidHexEscape)?;
-            let lo = chars
-                .next()
-                .and_then(|c| c.to_digit(16))
-                .ok_or(EscapeError::InvalidHexEscape)?;
+            let hi =
+                chars.next().and_then(|c| c.to_digit(16)).ok_or(EscapeError::InvalidHexEscape)?;
+            let lo =
+                chars.next().and_then(|c| c.to_digit(16)).ok_or(EscapeError::InvalidHexEscape)?;
             let value = hi.checked_mul(16).unwrap().checked_add(lo).unwrap();
 
             if value > 0x7F {
@@ -195,12 +158,11 @@ fn scan_escape(
             }
 
             let mut n_digits = 1;
-            let mut value: u32 =
-                match chars.next().ok_or(EscapeError::UnclosedUnicodeEscape)? {
-                    '_' => return Err(EscapeError::LeadingUnderscoreUnicodeEscape),
-                    '}' => return Err(EscapeError::EmptyUnicodeEscape),
-                    c => c.to_digit(16).ok_or(EscapeError::InvalidUnicodeEscape)?,
-                };
+            let mut value: u32 = match chars.next().ok_or(EscapeError::UnclosedUnicodeEscape)? {
+                '_' => return Err(EscapeError::LeadingUnderscoreUnicodeEscape),
+                '}' => return Err(EscapeError::EmptyUnicodeEscape),
+                c => c.to_digit(16).ok_or(EscapeError::InvalidUnicodeEscape)?,
+            };
 
             loop {
                 match chars.next() {
@@ -219,8 +181,7 @@ fn scan_escape(
                         })?;
                     }
                     Some(c) => {
-                        let digit =
-                            c.to_digit(16).ok_or(EscapeError::InvalidUnicodeEscape)?;
+                        let digit = c.to_digit(16).ok_or(EscapeError::InvalidUnicodeEscape)?;
                         n_digits += 1;
                         if n_digits > 6 {
                             return Err(EscapeError::OverlongUnicodeEscape);
@@ -235,6 +196,57 @@ fn scan_escape(
         _ => return Err(EscapeError::InvalidEscape),
     };
     Ok(res)
+}
+
+/// Takes a contents of a string literal (without quotes) and produces a
+/// sequence of escaped characters or errors.
+pub(crate) fn unescape_str_or_byte_str<F>(src: &str, mode: Mode, callback: &mut F)
+where
+    F: FnMut(Range<usize>, Result<char, EscapeError>),
+{
+    let initial_len = src.len();
+    let mut chars = src.chars();
+    while let Some(first_char) = chars.next() {
+        let start = initial_len - chars.as_str().len() - first_char.len_utf8();
+
+        let escaped_char = match first_char {
+            '\\' => {
+                let (second_char, third_char) = {
+                    let mut chars = chars.clone();
+                    (chars.next(), chars.next())
+                };
+                match (second_char, third_char) {
+                    (Some('\n'), _) | (Some('\r'), Some('\n')) => {
+                        skip_ascii_whitespace(&mut chars);
+                        continue;
+                    }
+                    _ => scan_escape(first_char, &mut chars, mode),
+                }
+            }
+            '\n' => Ok('\n'),
+            '\r' => {
+                let second_char = chars.clone().next();
+                if second_char == Some('\n') {
+                    chars.next();
+                    Ok('\n')
+                } else {
+                    scan_escape(first_char, &mut chars, mode)
+                }
+            }
+            _ => scan_escape(first_char, &mut chars, mode),
+        };
+        let end = initial_len - chars.as_str().len();
+        callback(start..end, escaped_char);
+    }
+
+    fn skip_ascii_whitespace(chars: &mut Chars<'_>) {
+        let str = chars.as_str();
+        let first_non_space = str
+            .bytes()
+            .position(|b| b != b' ' && b != b'\t' && b != b'\n' && b != b'\r')
+            .unwrap_or(str.len());
+        *chars = str[first_non_space..].chars()
+    }
 }
 
 #[cfg(test)]
@@ -271,7 +283,7 @@ mod tests {
 
         check(r"\v", EscapeError::InvalidEscape);
         check(r"\💩", EscapeError::InvalidEscape);
-        check(r"\●",  EscapeError::InvalidEscape);
+        check(r"\●", EscapeError::InvalidEscape);
 
         check(r"\x", EscapeError::InvalidHexEscape);
         check(r"\x0", EscapeError::InvalidHexEscape);
@@ -391,7 +403,7 @@ mod tests {
 
         check(r"\v", EscapeError::InvalidEscape);
         check(r"\💩", EscapeError::InvalidEscape);
-        check(r"\●",  EscapeError::InvalidEscape);
+        check(r"\●", EscapeError::InvalidEscape);
 
         check(r"\x", EscapeError::InvalidHexEscape);
         check(r"\x0", EscapeError::InvalidHexEscape);
@@ -436,7 +448,6 @@ mod tests {
         check(r"\u{DBFF}", EscapeError::UnicodeEscapeInByte);
     }
 
-
     #[test]
     fn test_unescape_byte_good() {
         fn check(literal_text: &str, expected_byte: u8) {
@@ -458,5 +469,30 @@ mod tests {
         check(r"\x5a", b'Z');
         check(r"\x5A", b'Z');
         check(r"\x7f", 127);
+    }
+
+    #[test]
+    fn test_unescape_byte_str_good() {
+        fn check(literal_text: &str, expected: &[u8]) {
+            let mut buf = Ok(Vec::with_capacity(literal_text.len()));
+            unescape_byte_str(literal_text, &mut |range, c| {
+                if let Ok(b) = &mut buf {
+                    match c {
+                        Ok(c) => b.push(c),
+                        Err(e) => buf = Err((range, e)),
+                    }
+                }
+            });
+            let buf = buf.as_ref().map(|it| it.as_ref());
+            assert_eq!(buf, Ok(expected))
+        }
+
+        check("foo", b"foo");
+        check("", b"");
+        check(" \n\r\n", b" \n\n");
+
+        check("hello \\\n     world", b"hello world");
+        check("hello \\\r\n     world", b"hello world");
+        check("thread's", b"thread's")
     }
 }
