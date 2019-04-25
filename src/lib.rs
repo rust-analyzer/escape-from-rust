@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Utilities for turning string and char literals into values they represent.
 
 use std::str::Chars;
@@ -27,7 +28,8 @@ pub enum UnescapeCharError {
 
 pub fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
     let mut chars = literal_text.chars();
-    let res = scan_char_escape(&mut chars)?;
+    let first_char = chars.next().ok_or(UnescapeCharError::ZeroChars)?;
+    let res = scan_char_escape(first_char, &mut chars)?;
     if chars.next().is_some() {
         return Err(UnescapeCharError::MoreThanOneChar);
     }
@@ -53,7 +55,7 @@ where
                         skip_ascii_whitespace(&mut chars);
                         continue;
                     }
-                    _ => scan_char_escape_with_first_char(first_char, &mut chars),
+                    _ => scan_char_escape(first_char, &mut chars),
                 }
             }
             '\n' => Ok('\n'),
@@ -63,16 +65,16 @@ where
                     chars.next();
                     Ok('\n')
                 } else {
-                    scan_char_escape_with_first_char(first_char, &mut chars)
+                    scan_char_escape(first_char, &mut chars)
                 }
             }
-            _ => scan_char_escape_with_first_char(first_char, &mut chars),
+            _ => scan_char_escape(first_char, &mut chars),
         };
         let end = initial_len - chars.as_str().len();
         callback(start..end, escaped_char);
     }
 
-    fn skip_ascii_whitespace(chars: &mut Chars) {
+    fn skip_ascii_whitespace(chars: &mut Chars<'_>) {
         let str = chars.as_str();
         let first_non_space = str
             .bytes()
@@ -82,18 +84,13 @@ where
     }
 }
 
-fn scan_char_escape(chars: &mut Chars) -> Result<char, UnescapeCharError> {
-    let first_char = chars.next().ok_or(UnescapeCharError::ZeroChars)?;
-    scan_char_escape_with_first_char(first_char, chars)
-}
-
-fn scan_char_escape_with_first_char(
+fn scan_char_escape(
     first_char: char,
-    chars: &mut Chars,
+    chars: &mut Chars<'_>,
 ) -> Result<char, UnescapeCharError> {
     if first_char != '\\' {
         return match first_char {
-            '\t' | '\n' | '\'' => Err(UnescapeCharError::EscapeOnlyChar),
+            '\t' | '\n' => Err(UnescapeCharError::EscapeOnlyChar),
             '\r' => Err(if chars.clone().next() == Some('\n') {
                 UnescapeCharError::EscapeOnlyChar
             } else {
@@ -178,24 +175,6 @@ fn scan_char_escape_with_first_char(
     Ok(res)
 }
 
-pub enum UnescapeByteError {}
-
-pub fn unescape_byte(_literal_text: &str) -> Result<u8, UnescapeByteError> {
-    Ok(b'x')
-}
-
-pub struct UnescapeByteStrErrorInfo {
-    _src_pos: usize,
-    _error: UnescapeCharError,
-}
-
-pub fn unescape_byte_str<F>(_src: &str, _buf: &mut Vec<u8>, _on_error: &mut F)
-where
-    F: FnMut(&mut Vec<u8>, UnescapeByteStrErrorInfo),
-{
-
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,7 +191,6 @@ mod tests {
 
         check("\n", UnescapeCharError::EscapeOnlyChar);
         check("\r\n", UnescapeCharError::EscapeOnlyChar);
-        check("'", UnescapeCharError::EscapeOnlyChar);
         check("\t", UnescapeCharError::EscapeOnlyChar);
         check("\r", UnescapeCharError::BareCarriageReturn);
 
@@ -273,6 +251,7 @@ mod tests {
         check("a", 'a');
         check("ы", 'ы');
         check("🦀", '🦀');
+        check("'", '\'');
 
         check(r#"\""#, '"');
         check(r"\n", '\n');
@@ -318,5 +297,6 @@ mod tests {
 
         check("hello \\\n     world", "hello world");
         check("hello \\\r\n     world", "hello world");
+        check("thread's", "thread's")
     }
 }
