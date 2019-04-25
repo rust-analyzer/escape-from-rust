@@ -31,7 +31,7 @@ pub(crate) enum EscapeError {
 pub(crate) fn unescape_char(literal_text: &str) -> Result<char, EscapeError> {
     let mut chars = literal_text.chars();
     let first_char = chars.next().ok_or(EscapeError::ZeroChars)?;
-    let res = scan_escape(first_char, &mut chars, '\'')?;
+    let res = scan_escape(first_char, &mut chars, Mode::Char)?;
     if chars.next().is_some() {
         return Err(EscapeError::MoreThanOneChar);
     }
@@ -48,6 +48,7 @@ where
     let mut chars = src.chars();
     while let Some(first_char) = chars.next() {
         let start = initial_len - chars.as_str().len() - first_char.len_utf8();
+
         let escaped_char = match first_char {
             '\\' => {
                 let (second_char, third_char) = {
@@ -59,7 +60,7 @@ where
                         skip_ascii_whitespace(&mut chars);
                         continue;
                     }
-                    _ => scan_escape(first_char, &mut chars, '"'),
+                    _ => scan_escape(first_char, &mut chars, Mode::Str),
                 }
             }
             '\n' => Ok('\n'),
@@ -69,10 +70,10 @@ where
                     chars.next();
                     Ok('\n')
                 } else {
-                    scan_escape(first_char, &mut chars, '"')
+                    scan_escape(first_char, &mut chars, Mode::Str)
                 }
             }
-            _ => scan_escape(first_char, &mut chars, '"'),
+            _ => scan_escape(first_char, &mut chars, Mode::Str),
         };
         let end = initial_len - chars.as_str().len();
         callback(start..end, escaped_char);
@@ -88,10 +89,32 @@ where
     }
 }
 
+#[derive(Clone, Copy)]
+enum Mode {
+    Char,
+    Str
+}
+
+impl Mode {
+    fn is_char(self) -> bool {
+        match self {
+            Mode::Char => true,
+            Mode::Str => false,
+        }
+    }
+
+    fn is_str(self) -> bool {
+        match self {
+            Mode::Char => false,
+            Mode::Str => true,
+        }
+    }
+}
+
 fn scan_escape(
     first_char: char,
     chars: &mut Chars<'_>,
-    quote: char,
+    mode: Mode,
 ) -> Result<char, EscapeError> {
     if first_char != '\\' {
         return match first_char {
@@ -101,8 +124,8 @@ fn scan_escape(
             } else {
                 EscapeError::BareCarriageReturn
             }),
-            '\'' if quote == '\'' => Err(EscapeError::EscapeOnlyChar),
-            '"' if quote == '"' => Err(EscapeError::EscapeOnlyChar),
+            '\'' if mode.is_char() => Err(EscapeError::EscapeOnlyChar),
+            '"' if mode.is_str() => Err(EscapeError::EscapeOnlyChar),
             _ => Ok(first_char),
         };
     }
