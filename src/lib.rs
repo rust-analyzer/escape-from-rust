@@ -57,6 +57,15 @@ where
                 }
             }
             '\n' => Ok('\n'),
+            '\r' => {
+                let second_char = chars.clone().next();
+                if second_char == Some('\n') {
+                    chars.next();
+                    Ok('\n')
+                } else {
+                    scan_char_escape_with_first_char(first_char, &mut chars)
+                }
+            }
             _ => scan_char_escape_with_first_char(first_char, &mut chars),
         };
         let end = initial_len - chars.as_str().len();
@@ -305,8 +314,9 @@ mod tests {
 
         check("foo", "foo");
         check("", "");
-        check(" \n", " \n");
+        check(" \n\r\n", " \n\n");
 
         check("hello \\\n     world", "hello world");
+        check("hello \\\r\n     world", "hello world");
     }
 }
