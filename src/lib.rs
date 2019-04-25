@@ -5,7 +5,7 @@ use std::str::Chars;
 use std::ops::Range;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum UnescapeCharError {
+pub(crate) enum EscapeError {
     ZeroChars,
     MoreThanOneChar,
 
@@ -28,12 +28,12 @@ pub(crate) enum UnescapeCharError {
 
 /// Takes a contents of a char literal (without quotes), and returns an
 /// unescaped char or an error
-pub(crate) fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharError> {
+pub(crate) fn unescape_char(literal_text: &str) -> Result<char, EscapeError> {
     let mut chars = literal_text.chars();
-    let first_char = chars.next().ok_or(UnescapeCharError::ZeroChars)?;
-    let res = scan_char_escape(first_char, &mut chars, '\'')?;
+    let first_char = chars.next().ok_or(EscapeError::ZeroChars)?;
+    let res = scan_escape(first_char, &mut chars, '\'')?;
     if chars.next().is_some() {
-        return Err(UnescapeCharError::MoreThanOneChar);
+        return Err(EscapeError::MoreThanOneChar);
     }
     Ok(res)
 }
@@ -42,7 +42,7 @@ pub(crate) fn unescape_char(literal_text: &str) -> Result<char, UnescapeCharErro
 /// sequence of escaped characters or errors.
 pub(crate) fn unescape_str<F>(src: &str, callback: &mut F)
 where
-    F: FnMut(Range<usize>, Result<char, UnescapeCharError>),
+    F: FnMut(Range<usize>, Result<char, EscapeError>),
 {
     let initial_len = src.len();
     let mut chars = src.chars();
@@ -59,7 +59,7 @@ where
                         skip_ascii_whitespace(&mut chars);
                         continue;
                     }
-                    _ => scan_char_escape(first_char, &mut chars, '"'),
+                    _ => scan_escape(first_char, &mut chars, '"'),
                 }
             }
             '\n' => Ok('\n'),
@@ -69,10 +69,10 @@ where
                     chars.next();
                     Ok('\n')
                 } else {
-                    scan_char_escape(first_char, &mut chars, '"')
+                    scan_escape(first_char, &mut chars, '"')
                 }
             }
-            _ => scan_char_escape(first_char, &mut chars, '"'),
+            _ => scan_escape(first_char, &mut chars, '"'),
         };
         let end = initial_len - chars.as_str().len();
         callback(start..end, escaped_char);
@@ -88,26 +88,26 @@ where
     }
 }
 
-fn scan_char_escape(
+fn scan_escape(
     first_char: char,
     chars: &mut Chars<'_>,
     quote: char,
-) -> Result<char, UnescapeCharError> {
+) -> Result<char, EscapeError> {
     if first_char != '\\' {
         return match first_char {
-            '\t' | '\n' => Err(UnescapeCharError::EscapeOnlyChar),
+            '\t' | '\n' => Err(EscapeError::EscapeOnlyChar),
             '\r' => Err(if chars.clone().next() == Some('\n') {
-                UnescapeCharError::EscapeOnlyChar
+                EscapeError::EscapeOnlyChar
             } else {
-                UnescapeCharError::BareCarriageReturn
+                EscapeError::BareCarriageReturn
             }),
-            '\'' if quote == '\'' => Err(UnescapeCharError::EscapeOnlyChar),
-            '"' if quote == '"' => Err(UnescapeCharError::EscapeOnlyChar),
+            '\'' if quote == '\'' => Err(EscapeError::EscapeOnlyChar),
+            '"' if quote == '"' => Err(EscapeError::EscapeOnlyChar),
             _ => Ok(first_char),
         };
     }
 
-    let second_char = chars.next().ok_or(UnescapeCharError::LoneSlash)?;
+    let second_char = chars.next().ok_or(EscapeError::LoneSlash)?;
 
     let res = match second_char {
         '"' => '"',
@@ -122,15 +122,15 @@ fn scan_char_escape(
             let hi = chars
                 .next()
                 .and_then(|c| c.to_digit(16))
-                .ok_or(UnescapeCharError::InvalidHexEscape)?;
+                .ok_or(EscapeError::InvalidHexEscape)?;
             let lo = chars
                 .next()
                 .and_then(|c| c.to_digit(16))
-                .ok_or(UnescapeCharError::InvalidHexEscape)?;
+                .ok_or(EscapeError::InvalidHexEscape)?;
             let value = hi.checked_mul(16).unwrap().checked_add(lo).unwrap();
 
             if value > 0x7f {
-                return Err(UnescapeCharError::OutOfRangeHexEscape);
+                return Err(EscapeError::OutOfRangeHexEscape);
             }
             let value = value as u8;
 
@@ -139,36 +139,36 @@ fn scan_char_escape(
 
         'u' => {
             if chars.next() != Some('{') {
-                return Err(UnescapeCharError::InvalidUnicodeEscape);
+                return Err(EscapeError::InvalidUnicodeEscape);
             }
 
             let mut n_digits = 1;
             let mut value: u32 =
-                match chars.next().ok_or(UnescapeCharError::UnclosedUnicodeEscape)? {
-                    '_' => return Err(UnescapeCharError::LeadingUnderscoreUnicodeEscape),
-                    '}' => return Err(UnescapeCharError::EmptyUnicodeEscape),
-                    c => c.to_digit(16).ok_or(UnescapeCharError::InvalidUnicodeEscape)?,
+                match chars.next().ok_or(EscapeError::UnclosedUnicodeEscape)? {
+                    '_' => return Err(EscapeError::LeadingUnderscoreUnicodeEscape),
+                    '}' => return Err(EscapeError::EmptyUnicodeEscape),
+                    c => c.to_digit(16).ok_or(EscapeError::InvalidUnicodeEscape)?,
                 };
 
             loop {
                 match chars.next() {
-                    None => return Err(UnescapeCharError::UnclosedUnicodeEscape),
+                    None => return Err(EscapeError::UnclosedUnicodeEscape),
                     Some('_') => continue,
                     Some('}') => {
                         break std::char::from_u32(value).ok_or_else(|| {
                             if value > 0x10FFFF {
-                                UnescapeCharError::OutOfRangeUnicodeEscape
+                                EscapeError::OutOfRangeUnicodeEscape
                             } else {
-                                UnescapeCharError::LoneSurrogateUnicodeEscape
+                                EscapeError::LoneSurrogateUnicodeEscape
                             }
                         })?;
                     }
                     Some(c) => {
                         let digit =
-                            c.to_digit(16).ok_or(UnescapeCharError::InvalidUnicodeEscape)?;
+                            c.to_digit(16).ok_or(EscapeError::InvalidUnicodeEscape)?;
                         n_digits += 1;
                         if n_digits > 6 {
-                            return Err(UnescapeCharError::OverlongUnicodeEscape);
+                            return Err(EscapeError::OverlongUnicodeEscape);
                         }
 
                         let digit = digit as u32;
@@ -177,7 +177,7 @@ fn scan_char_escape(
                 };
             }
         }
-        _ => return Err(UnescapeCharError::InvalidEscape),
+        _ => return Err(EscapeError::InvalidEscape),
     };
     Ok(res)
 }
@@ -188,66 +188,66 @@ mod tests {
 
     #[test]
     fn test_unescape_char_bad() {
-        fn check(literal_text: &str, expected_error: UnescapeCharError) {
+        fn check(literal_text: &str, expected_error: EscapeError) {
             let actual_result = unescape_char(literal_text);
             assert_eq!(actual_result, Err(expected_error));
         }
 
-        check("", UnescapeCharError::ZeroChars);
-        check(r"\", UnescapeCharError::LoneSlash);
+        check("", EscapeError::ZeroChars);
+        check(r"\", EscapeError::LoneSlash);
 
-        check("\n", UnescapeCharError::EscapeOnlyChar);
-        check("\r\n", UnescapeCharError::EscapeOnlyChar);
-        check("\t", UnescapeCharError::EscapeOnlyChar);
-        check("'", UnescapeCharError::EscapeOnlyChar);
-        check("\r", UnescapeCharError::BareCarriageReturn);
+        check("\n", EscapeError::EscapeOnlyChar);
+        check("\r\n", EscapeError::EscapeOnlyChar);
+        check("\t", EscapeError::EscapeOnlyChar);
+        check("'", EscapeError::EscapeOnlyChar);
+        check("\r", EscapeError::BareCarriageReturn);
 
-        check("spam", UnescapeCharError::MoreThanOneChar);
-        check(r"\x0ff", UnescapeCharError::MoreThanOneChar);
-        check(r#"\"a"#, UnescapeCharError::MoreThanOneChar);
-        check(r"\na", UnescapeCharError::MoreThanOneChar);
-        check(r"\ra", UnescapeCharError::MoreThanOneChar);
-        check(r"\ta", UnescapeCharError::MoreThanOneChar);
-        check(r"\\a", UnescapeCharError::MoreThanOneChar);
-        check(r"\'a", UnescapeCharError::MoreThanOneChar);
-        check(r"\0a", UnescapeCharError::MoreThanOneChar);
-        check(r"\u{0}x", UnescapeCharError::MoreThanOneChar);
-        check(r"\u{1F63b}}", UnescapeCharError::MoreThanOneChar);
+        check("spam", EscapeError::MoreThanOneChar);
+        check(r"\x0ff", EscapeError::MoreThanOneChar);
+        check(r#"\"a"#, EscapeError::MoreThanOneChar);
+        check(r"\na", EscapeError::MoreThanOneChar);
+        check(r"\ra", EscapeError::MoreThanOneChar);
+        check(r"\ta", EscapeError::MoreThanOneChar);
+        check(r"\\a", EscapeError::MoreThanOneChar);
+        check(r"\'a", EscapeError::MoreThanOneChar);
+        check(r"\0a", EscapeError::MoreThanOneChar);
+        check(r"\u{0}x", EscapeError::MoreThanOneChar);
+        check(r"\u{1F63b}}", EscapeError::MoreThanOneChar);
 
-        check(r"\v", UnescapeCharError::InvalidEscape);
-        check(r"\💩", UnescapeCharError::InvalidEscape);
-        check(r"\●",  UnescapeCharError::InvalidEscape);
+        check(r"\v", EscapeError::InvalidEscape);
+        check(r"\💩", EscapeError::InvalidEscape);
+        check(r"\●",  EscapeError::InvalidEscape);
 
-        check(r"\x", UnescapeCharError::InvalidHexEscape);
-        check(r"\x0", UnescapeCharError::InvalidHexEscape);
-        check(r"\xa", UnescapeCharError::InvalidHexEscape);
-        check(r"\xf", UnescapeCharError::InvalidHexEscape);
-        check(r"\xx", UnescapeCharError::InvalidHexEscape);
-        check(r"\xы", UnescapeCharError::InvalidHexEscape);
-        check(r"\x🦀", UnescapeCharError::InvalidHexEscape);
-        check(r"\xtt", UnescapeCharError::InvalidHexEscape);
-        check(r"\xff", UnescapeCharError::OutOfRangeHexEscape);
-        check(r"\xFF", UnescapeCharError::OutOfRangeHexEscape);
-        check(r"\x80", UnescapeCharError::OutOfRangeHexEscape);
+        check(r"\x", EscapeError::InvalidHexEscape);
+        check(r"\x0", EscapeError::InvalidHexEscape);
+        check(r"\xa", EscapeError::InvalidHexEscape);
+        check(r"\xf", EscapeError::InvalidHexEscape);
+        check(r"\xx", EscapeError::InvalidHexEscape);
+        check(r"\xы", EscapeError::InvalidHexEscape);
+        check(r"\x🦀", EscapeError::InvalidHexEscape);
+        check(r"\xtt", EscapeError::InvalidHexEscape);
+        check(r"\xff", EscapeError::OutOfRangeHexEscape);
+        check(r"\xFF", EscapeError::OutOfRangeHexEscape);
+        check(r"\x80", EscapeError::OutOfRangeHexEscape);
 
-        check(r"\u", UnescapeCharError::InvalidUnicodeEscape);
-        check(r"\u[0123]", UnescapeCharError::InvalidUnicodeEscape);
-        check(r"\u{", UnescapeCharError::UnclosedUnicodeEscape);
-        check(r"\u{0000", UnescapeCharError::UnclosedUnicodeEscape);
-        check(r"\u{}", UnescapeCharError::EmptyUnicodeEscape);
-        check(r"\u{_0000}", UnescapeCharError::LeadingUnderscoreUnicodeEscape);
-        check(r"\u{0000000}", UnescapeCharError::OverlongUnicodeEscape);
-        check(r"\u{FFFFFF}", UnescapeCharError::OutOfRangeUnicodeEscape);
-        check(r"\u{ffffff}", UnescapeCharError::OutOfRangeUnicodeEscape);
-        check(r"\u{ffffff}", UnescapeCharError::OutOfRangeUnicodeEscape);
+        check(r"\u", EscapeError::InvalidUnicodeEscape);
+        check(r"\u[0123]", EscapeError::InvalidUnicodeEscape);
+        check(r"\u{", EscapeError::UnclosedUnicodeEscape);
+        check(r"\u{0000", EscapeError::UnclosedUnicodeEscape);
+        check(r"\u{}", EscapeError::EmptyUnicodeEscape);
+        check(r"\u{_0000}", EscapeError::LeadingUnderscoreUnicodeEscape);
+        check(r"\u{0000000}", EscapeError::OverlongUnicodeEscape);
+        check(r"\u{FFFFFF}", EscapeError::OutOfRangeUnicodeEscape);
+        check(r"\u{ffffff}", EscapeError::OutOfRangeUnicodeEscape);
+        check(r"\u{ffffff}", EscapeError::OutOfRangeUnicodeEscape);
 
-        check(r"\u{DC00}", UnescapeCharError::LoneSurrogateUnicodeEscape);
-        check(r"\u{DDDD}", UnescapeCharError::LoneSurrogateUnicodeEscape);
-        check(r"\u{DFFF}", UnescapeCharError::LoneSurrogateUnicodeEscape);
+        check(r"\u{DC00}", EscapeError::LoneSurrogateUnicodeEscape);
+        check(r"\u{DDDD}", EscapeError::LoneSurrogateUnicodeEscape);
+        check(r"\u{DFFF}", EscapeError::LoneSurrogateUnicodeEscape);
 
-        check(r"\u{D800}", UnescapeCharError::LoneSurrogateUnicodeEscape);
-        check(r"\u{DAAA}", UnescapeCharError::LoneSurrogateUnicodeEscape);
-        check(r"\u{DBFF}", UnescapeCharError::LoneSurrogateUnicodeEscape);
+        check(r"\u{D800}", EscapeError::LoneSurrogateUnicodeEscape);
+        check(r"\u{DAAA}", EscapeError::LoneSurrogateUnicodeEscape);
+        check(r"\u{DBFF}", EscapeError::LoneSurrogateUnicodeEscape);
     }
 
     #[test]
