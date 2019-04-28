@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Utilities for validating  string and char literals and turning them into
 //! values they represent.
 
@@ -14,10 +15,12 @@ pub(crate) enum EscapeError {
     BareCarriageReturn,
     EscapeOnlyChar,
 
-    InvalidHexEscape,
+    TooShortHexEscape,
+    InvalidCharInHexEscape,
     OutOfRangeHexEscape,
 
     InvalidUnicodeEscape,
+    InvalidCharInUnicodeEscape,
     EmptyUnicodeEscape,
     UnclosedUnicodeEscape,
     LeadingUnderscoreUnicodeEscape,
@@ -31,14 +34,17 @@ pub(crate) enum EscapeError {
 
 /// Takes a contents of a char literal (without quotes), and returns an
 /// unescaped char or an error
-pub(crate) fn unescape_char(literal_text: &str) -> Result<char, EscapeError> {
+pub(crate) fn unescape_char(literal_text: &str) -> Result<char, (usize, EscapeError)> {
     let mut chars = literal_text.chars();
-    let first_char = chars.next().ok_or(EscapeError::ZeroChars)?;
-    let res = scan_escape(first_char, &mut chars, Mode::Char)?;
-    if chars.next().is_some() {
-        return Err(EscapeError::MoreThanOneChar);
-    }
-    Ok(res)
+    let res = (|| {
+        let first_char = chars.next().ok_or(EscapeError::ZeroChars)?;
+        let res = scan_escape(first_char, &mut chars, Mode::Char)?;
+        if chars.next().is_some() {
+            return Err(EscapeError::MoreThanOneChar);
+        }
+        Ok(res)
+    })();
+    res.map_err(|err| (literal_text.len() - chars.as_str().len(), err))
 }
 
 /// Takes a contents of a string literal (without quotes) and produces a
@@ -50,14 +56,17 @@ where
     unescape_str_or_byte_str(literal_text, Mode::Str, callback)
 }
 
-pub(crate) fn unescape_byte(literal_text: &str) -> Result<u8, EscapeError> {
+pub(crate) fn unescape_byte(literal_text: &str) -> Result<u8, (usize, EscapeError)> {
     let mut chars = literal_text.chars();
-    let first_char = chars.next().ok_or(EscapeError::ZeroChars)?;
-    let res = scan_escape(first_char, &mut chars, Mode::Byte)?;
-    if chars.next().is_some() {
-        return Err(EscapeError::MoreThanOneChar);
-    }
-    Ok(byte_from_char(res))
+    let res = (|| {
+        let first_char = chars.next().ok_or(EscapeError::ZeroChars)?;
+        let res = scan_escape(first_char, &mut chars, Mode::Byte)?;
+        if chars.next().is_some() {
+            return Err(EscapeError::MoreThanOneChar);
+        }
+        Ok(byte_from_char(res))
+    })();
+    res.map_err(|err| (literal_text.len() - chars.as_str().len(), err))
 }
 
 /// Takes a contents of a string literal (without quotes) and produces a
@@ -138,10 +147,12 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
         '0' => '\0',
 
         'x' => {
-            let hi =
-                chars.next().and_then(|c| c.to_digit(16)).ok_or(EscapeError::InvalidHexEscape)?;
-            let lo =
-                chars.next().and_then(|c| c.to_digit(16)).ok_or(EscapeError::InvalidHexEscape)?;
+            let hi = chars.next().ok_or(EscapeError::TooShortHexEscape)?;
+            let hi = hi.to_digit(16).ok_or(EscapeError::InvalidCharInHexEscape)?;
+
+            let lo = chars.next().ok_or(EscapeError::TooShortHexEscape)?;
+            let lo = lo.to_digit(16).ok_or(EscapeError::InvalidCharInHexEscape)?;
+
             let value = hi.checked_mul(16).unwrap().checked_add(lo).unwrap();
 
             if value > 0x7F {
@@ -161,7 +172,7 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
             let mut value: u32 = match chars.next().ok_or(EscapeError::UnclosedUnicodeEscape)? {
                 '_' => return Err(EscapeError::LeadingUnderscoreUnicodeEscape),
                 '}' => return Err(EscapeError::EmptyUnicodeEscape),
-                c => c.to_digit(16).ok_or(EscapeError::InvalidUnicodeEscape)?,
+                c => c.to_digit(16).ok_or(EscapeError::InvalidCharInUnicodeEscape)?,
             };
 
             loop {
@@ -181,7 +192,7 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
                         })?;
                     }
                     Some(c) => {
-                        let digit = c.to_digit(16).ok_or(EscapeError::InvalidUnicodeEscape)?;
+                        let digit = c.to_digit(16).ok_or(EscapeError::InvalidCharInUnicodeEscape)?;
                         n_digits += 1;
                         if n_digits > 6 {
                             return Err(EscapeError::OverlongUnicodeEscape);
@@ -200,7 +211,7 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
 
 /// Takes a contents of a string literal (without quotes) and produces a
 /// sequence of escaped characters or errors.
-pub(crate) fn unescape_str_or_byte_str<F>(src: &str, mode: Mode, callback: &mut F)
+fn unescape_str_or_byte_str<F>(src: &str, mode: Mode, callback: &mut F)
 where
     F: FnMut(Range<usize>, Result<char, EscapeError>),
 {
@@ -256,7 +267,7 @@ mod tests {
     #[test]
     fn test_unescape_char_bad() {
         fn check(literal_text: &str, expected_error: EscapeError) {
-            let actual_result = unescape_char(literal_text);
+            let actual_result = unescape_char(literal_text).map_err(|(_offset, err)| err);
             assert_eq!(actual_result, Err(expected_error));
         }
 
@@ -285,20 +296,21 @@ mod tests {
         check(r"\💩", EscapeError::InvalidEscape);
         check(r"\●", EscapeError::InvalidEscape);
 
-        check(r"\x", EscapeError::InvalidHexEscape);
-        check(r"\x0", EscapeError::InvalidHexEscape);
-        check(r"\xa", EscapeError::InvalidHexEscape);
-        check(r"\xf", EscapeError::InvalidHexEscape);
-        check(r"\xx", EscapeError::InvalidHexEscape);
-        check(r"\xы", EscapeError::InvalidHexEscape);
-        check(r"\x🦀", EscapeError::InvalidHexEscape);
-        check(r"\xtt", EscapeError::InvalidHexEscape);
+        check(r"\x", EscapeError::TooShortHexEscape);
+        check(r"\x0", EscapeError::TooShortHexEscape);
+        check(r"\xf", EscapeError::TooShortHexEscape);
+        check(r"\xa", EscapeError::TooShortHexEscape);
+        check(r"\xx", EscapeError::InvalidCharInHexEscape);
+        check(r"\xы", EscapeError::InvalidCharInHexEscape);
+        check(r"\x🦀", EscapeError::InvalidCharInHexEscape);
+        check(r"\xtt", EscapeError::InvalidCharInHexEscape);
         check(r"\xff", EscapeError::OutOfRangeHexEscape);
         check(r"\xFF", EscapeError::OutOfRangeHexEscape);
         check(r"\x80", EscapeError::OutOfRangeHexEscape);
 
         check(r"\u", EscapeError::InvalidUnicodeEscape);
         check(r"\u[0123]", EscapeError::InvalidUnicodeEscape);
+        check(r"\u{0x}", EscapeError::InvalidCharInUnicodeEscape);
         check(r"\u{", EscapeError::UnclosedUnicodeEscape);
         check(r"\u{0000", EscapeError::UnclosedUnicodeEscape);
         check(r"\u{}", EscapeError::EmptyUnicodeEscape);
@@ -378,7 +390,7 @@ mod tests {
     #[test]
     fn test_unescape_byte_bad() {
         fn check(literal_text: &str, expected_error: EscapeError) {
-            let actual_result = unescape_byte(literal_text);
+            let actual_result = unescape_byte(literal_text).map_err(|(_offset, err)| err);
             assert_eq!(actual_result, Err(expected_error));
         }
 
@@ -405,20 +417,21 @@ mod tests {
         check(r"\💩", EscapeError::InvalidEscape);
         check(r"\●", EscapeError::InvalidEscape);
 
-        check(r"\x", EscapeError::InvalidHexEscape);
-        check(r"\x0", EscapeError::InvalidHexEscape);
-        check(r"\xa", EscapeError::InvalidHexEscape);
-        check(r"\xf", EscapeError::InvalidHexEscape);
-        check(r"\xx", EscapeError::InvalidHexEscape);
-        check(r"\xы", EscapeError::InvalidHexEscape);
-        check(r"\x🦀", EscapeError::InvalidHexEscape);
-        check(r"\xtt", EscapeError::InvalidHexEscape);
+        check(r"\x", EscapeError::TooShortHexEscape);
+        check(r"\x0", EscapeError::TooShortHexEscape);
+        check(r"\xa", EscapeError::TooShortHexEscape);
+        check(r"\xf", EscapeError::TooShortHexEscape);
+        check(r"\xx", EscapeError::InvalidCharInHexEscape);
+        check(r"\xы", EscapeError::InvalidCharInHexEscape);
+        check(r"\x🦀", EscapeError::InvalidCharInHexEscape);
+        check(r"\xtt", EscapeError::InvalidCharInHexEscape);
         check(r"\xff", EscapeError::OutOfRangeHexEscape);
         check(r"\xFF", EscapeError::OutOfRangeHexEscape);
         check(r"\x80", EscapeError::OutOfRangeHexEscape);
 
         check(r"\u", EscapeError::InvalidUnicodeEscape);
         check(r"\u[0123]", EscapeError::InvalidUnicodeEscape);
+        check(r"\u{0x}", EscapeError::InvalidCharInUnicodeEscape);
         check(r"\u{", EscapeError::UnclosedUnicodeEscape);
         check(r"\u{0000", EscapeError::UnclosedUnicodeEscape);
         check(r"\u{}", EscapeError::EmptyUnicodeEscape);
