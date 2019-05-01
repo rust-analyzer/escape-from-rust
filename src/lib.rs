@@ -5,6 +5,7 @@
 use std::str::Chars;
 use std::ops::Range;
 
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum EscapeError {
     ZeroChars,
@@ -75,23 +76,16 @@ pub(crate) fn unescape_byte_str<F>(literal_text: &str, callback: &mut F)
 where
     F: FnMut(Range<usize>, Result<u8, EscapeError>),
 {
-    unescape_str_or_byte_str(literal_text, Mode::Str, &mut |range, char| {
+    unescape_str_or_byte_str(literal_text, Mode::ByteStr, &mut |range, char| {
         callback(range, char.map(byte_from_char))
     })
 }
 
-fn byte_from_char(c: char) -> u8 {
-    let res = c as u32;
-    assert!(res <= u8::max_value() as u32, "guaranteed because of Mode::Byte");
-    res as u8
-}
-
 #[derive(Clone, Copy)]
-enum Mode {
+pub(crate) enum Mode {
     Char,
     Str,
     Byte,
-    #[allow(unused)]
     ByteStr,
 }
 
@@ -107,10 +101,10 @@ impl Mode {
         !self.in_single_quotes()
     }
 
-    fn allow_unicode(self) -> bool {
+    pub(crate) fn is_bytes(self) -> bool {
         match self {
-            Mode::Byte | Mode::ByteStr => false,
-            Mode::Char | Mode::Str => true,
+            Mode::Byte | Mode::ByteStr => true,
+            Mode::Char | Mode::Str => false,
         }
     }
 }
@@ -127,7 +121,7 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
             '\'' if mode.in_single_quotes() => Err(EscapeError::EscapeOnlyChar),
             '"' if mode.in_double_quotes() => Err(EscapeError::EscapeOnlyChar),
             _ => {
-                if !mode.allow_unicode() && (first_char as u32) > 0x7F {
+                if mode.is_bytes() && !first_char.is_ascii() {
                     return Err(EscapeError::NonAsciiCharInByte);
                 }
                 Ok(first_char)
@@ -153,9 +147,9 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
             let lo = chars.next().ok_or(EscapeError::TooShortHexEscape)?;
             let lo = lo.to_digit(16).ok_or(EscapeError::InvalidCharInHexEscape)?;
 
-            let value = hi.checked_mul(16).unwrap().checked_add(lo).unwrap();
+            let value = hi * 16 + lo;
 
-            if value > 0x7F {
+            if !mode.is_bytes() && !is_ascii(value) {
                 return Err(EscapeError::OutOfRangeHexEscape);
             }
             let value = value as u8;
@@ -180,7 +174,7 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
                     None => return Err(EscapeError::UnclosedUnicodeEscape),
                     Some('_') => continue,
                     Some('}') => {
-                        if !mode.allow_unicode() {
+                        if mode.is_bytes() {
                             return Err(EscapeError::UnicodeEscapeInByte);
                         }
                         break std::char::from_u32(value).ok_or_else(|| {
@@ -199,7 +193,7 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
                         }
 
                         let digit = digit as u32;
-                        value = value.checked_mul(16).unwrap().checked_add(digit).unwrap();
+                        value = value * 16 + digit;
                     }
                 };
             }
@@ -215,12 +209,13 @@ fn unescape_str_or_byte_str<F>(src: &str, mode: Mode, callback: &mut F)
 where
     F: FnMut(Range<usize>, Result<char, EscapeError>),
 {
+    assert!(mode.in_double_quotes());
     let initial_len = src.len();
     let mut chars = src.chars();
     while let Some(first_char) = chars.next() {
         let start = initial_len - chars.as_str().len() - first_char.len_utf8();
 
-        let escaped_char = match first_char {
+        let unescaped_char = match first_char {
             '\\' => {
                 let (second_char, third_char) = {
                     let mut chars = chars.clone();
@@ -234,7 +229,6 @@ where
                     _ => scan_escape(first_char, &mut chars, mode),
                 }
             }
-            '\n' => Ok('\n'),
             '\r' => {
                 let second_char = chars.clone().next();
                 if second_char == Some('\n') {
@@ -244,10 +238,12 @@ where
                     scan_escape(first_char, &mut chars, mode)
                 }
             }
+            '\n' => Ok('\n'),
+            '\t' => Ok('\t'),
             _ => scan_escape(first_char, &mut chars, mode),
         };
         let end = initial_len - chars.as_str().len();
-        callback(start..end, escaped_char);
+        callback(start..end, unescaped_char);
     }
 
     fn skip_ascii_whitespace(chars: &mut Chars<'_>) {
@@ -258,6 +254,16 @@ where
             .unwrap_or(str.len());
         *chars = str[first_non_space..].chars()
     }
+}
+
+fn byte_from_char(c: char) -> u8 {
+    let res = c as u32;
+    assert!(res <= u8::max_value() as u32, "guaranteed because of Mode::Byte");
+    res as u8
+}
+
+fn is_ascii(x: u32) -> bool {
+    x <= 0x7F
 }
 
 #[cfg(test)]
@@ -380,7 +386,7 @@ mod tests {
 
         check("foo", "foo");
         check("", "");
-        check(" \n\r\n", " \n\n");
+        check(" \t\n\r\n", " \t\n\n");
 
         check("hello \\\n     world", "hello world");
         check("hello \\\r\n     world", "hello world");
@@ -425,9 +431,6 @@ mod tests {
         check(r"\xы", EscapeError::InvalidCharInHexEscape);
         check(r"\x🦀", EscapeError::InvalidCharInHexEscape);
         check(r"\xtt", EscapeError::InvalidCharInHexEscape);
-        check(r"\xff", EscapeError::OutOfRangeHexEscape);
-        check(r"\xFF", EscapeError::OutOfRangeHexEscape);
-        check(r"\x80", EscapeError::OutOfRangeHexEscape);
 
         check(r"\u", EscapeError::InvalidUnicodeEscape);
         check(r"\u[0123]", EscapeError::InvalidUnicodeEscape);
@@ -482,6 +485,9 @@ mod tests {
         check(r"\x5a", b'Z');
         check(r"\x5A", b'Z');
         check(r"\x7f", 127);
+        check(r"\x80", 128);
+        check(r"\xff", 255);
+        check(r"\xFF", 255);
     }
 
     #[test]
@@ -502,7 +508,7 @@ mod tests {
 
         check("foo", b"foo");
         check("", b"");
-        check(" \n\r\n", b" \n\n");
+        check(" \t\n\r\n", b" \t\n\n");
 
         check("hello \\\n     world", b"hello world");
         check("hello \\\r\n     world", b"hello world");
