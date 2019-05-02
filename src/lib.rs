@@ -5,7 +5,6 @@
 use std::str::Chars;
 use std::ops::Range;
 
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum EscapeError {
     ZeroChars,
@@ -97,7 +96,7 @@ impl Mode {
         }
     }
 
-    fn in_double_quotes(self) -> bool {
+    pub(crate) fn in_double_quotes(self) -> bool {
         !self.in_single_quotes()
     }
 
@@ -174,9 +173,13 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
                     None => return Err(EscapeError::UnclosedUnicodeEscape),
                     Some('_') => continue,
                     Some('}') => {
+                        if n_digits > 6 {
+                            return Err(EscapeError::OverlongUnicodeEscape);
+                        }
                         if mode.is_bytes() {
                             return Err(EscapeError::UnicodeEscapeInByte);
                         }
+
                         break std::char::from_u32(value).ok_or_else(|| {
                             if value > 0x10FFFF {
                                 EscapeError::OutOfRangeUnicodeEscape
@@ -189,9 +192,8 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
                         let digit = c.to_digit(16).ok_or(EscapeError::InvalidCharInUnicodeEscape)?;
                         n_digits += 1;
                         if n_digits > 6 {
-                            return Err(EscapeError::OverlongUnicodeEscape);
+                            continue;
                         }
-
                         let digit = digit as u32;
                         value = value * 16 + digit;
                     }
