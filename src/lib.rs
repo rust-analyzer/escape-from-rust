@@ -1,25 +1,23 @@
-#![allow(unused)]
-//! Utilities for validating  string and char literals and turning them into
+//! Utilities for validating string and char literals and turning them into
 //! values they represent.
 
 use std::str::Chars;
 use std::ops::Range;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum EscapeError {
+pub enum EscapeError {
     ZeroChars,
     MoreThanOneChar,
 
     LoneSlash,
     InvalidEscape,
-    BareCarriageReturn,
     EscapeOnlyChar,
 
     TooShortHexEscape,
     InvalidCharInHexEscape,
     OutOfRangeHexEscape,
 
-    InvalidUnicodeEscape,
+    NoBraceInUnicodeEscape,
     InvalidCharInUnicodeEscape,
     EmptyUnicodeEscape,
     UnclosedUnicodeEscape,
@@ -30,48 +28,36 @@ pub(crate) enum EscapeError {
 
     UnicodeEscapeInByte,
     NonAsciiCharInByte,
+    NonAsciiCharInByteString,
 }
 
 /// Takes a contents of a char literal (without quotes), and returns an
 /// unescaped char or an error
-pub(crate) fn unescape_char(literal_text: &str) -> Result<char, (usize, EscapeError)> {
+pub fn unescape_char(literal_text: &str) -> Result<char, (usize, EscapeError)> {
     let mut chars = literal_text.chars();
-    let res = (|| {
-        let first_char = chars.next().ok_or(EscapeError::ZeroChars)?;
-        let res = scan_escape(first_char, &mut chars, Mode::Char)?;
-        if chars.next().is_some() {
-            return Err(EscapeError::MoreThanOneChar);
-        }
-        Ok(res)
-    })();
-    res.map_err(|err| (literal_text.len() - chars.as_str().len(), err))
+    unescape_char_or_byte(&mut chars, Mode::Char)
+        .map_err(|err| (literal_text.len() - chars.as_str().len(), err))
 }
 
 /// Takes a contents of a string literal (without quotes) and produces a
 /// sequence of escaped characters or errors.
-pub(crate) fn unescape_str<F>(literal_text: &str, callback: &mut F)
+pub fn unescape_str<F>(literal_text: &str, callback: &mut F)
 where
     F: FnMut(Range<usize>, Result<char, EscapeError>),
 {
     unescape_str_or_byte_str(literal_text, Mode::Str, callback)
 }
 
-pub(crate) fn unescape_byte(literal_text: &str) -> Result<u8, (usize, EscapeError)> {
+pub fn unescape_byte(literal_text: &str) -> Result<u8, (usize, EscapeError)> {
     let mut chars = literal_text.chars();
-    let res = (|| {
-        let first_char = chars.next().ok_or(EscapeError::ZeroChars)?;
-        let res = scan_escape(first_char, &mut chars, Mode::Byte)?;
-        if chars.next().is_some() {
-            return Err(EscapeError::MoreThanOneChar);
-        }
-        Ok(byte_from_char(res))
-    })();
-    res.map_err(|err| (literal_text.len() - chars.as_str().len(), err))
+    unescape_char_or_byte(&mut chars, Mode::Byte)
+        .map(byte_from_char)
+        .map_err(|err| (literal_text.len() - chars.as_str().len(), err))
 }
 
 /// Takes a contents of a string literal (without quotes) and produces a
 /// sequence of escaped characters or errors.
-pub(crate) fn unescape_byte_str<F>(literal_text: &str, callback: &mut F)
+pub fn unescape_byte_str<F>(literal_text: &str, callback: &mut F)
 where
     F: FnMut(Range<usize>, Result<u8, EscapeError>),
 {
@@ -80,8 +66,32 @@ where
     })
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum Mode {
+/// Takes a contents of a string literal (without quotes) and produces a
+/// sequence of characters or errors.
+/// NOTE: Raw strings do not perform any explicit character escaping, here we
+/// only translate CRLF to LF and produce errors on bare CR.
+pub fn unescape_raw_str<F>(literal_text: &str, callback: &mut F)
+where
+    F: FnMut(Range<usize>, Result<char, EscapeError>),
+{
+    unescape_raw_str_or_byte_str(literal_text, Mode::Str, callback)
+}
+
+/// Takes a contents of a string literal (without quotes) and produces a
+/// sequence of characters or errors.
+/// NOTE: Raw strings do not perform any explicit character escaping, here we
+/// only translate CRLF to LF and produce errors on bare CR.
+pub fn unescape_raw_byte_str<F>(literal_text: &str, callback: &mut F)
+where
+    F: FnMut(Range<usize>, Result<u8, EscapeError>),
+{
+    unescape_raw_str_or_byte_str(literal_text, Mode::ByteStr, &mut |range, char| {
+        callback(range, char.map(byte_from_char))
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Mode {
     Char,
     Str,
     Byte,
@@ -89,18 +99,18 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
-    fn in_single_quotes(self) -> bool {
+    pub fn in_single_quotes(self) -> bool {
         match self {
             Mode::Char | Mode::Byte => true,
             Mode::Str | Mode::ByteStr => false,
         }
     }
 
-    pub(crate) fn in_double_quotes(self) -> bool {
+    pub fn in_double_quotes(self) -> bool {
         !self.in_single_quotes()
     }
 
-    pub(crate) fn is_bytes(self) -> bool {
+    pub fn is_bytes(self) -> bool {
         match self {
             Mode::Byte | Mode::ByteStr => true,
             Mode::Char | Mode::Str => false,
@@ -108,15 +118,11 @@ impl Mode {
     }
 }
 
+
 fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<char, EscapeError> {
     if first_char != '\\' {
         return match first_char {
             '\t' | '\n' => Err(EscapeError::EscapeOnlyChar),
-            '\r' => Err(if chars.clone().next() == Some('\n') {
-                EscapeError::EscapeOnlyChar
-            } else {
-                EscapeError::BareCarriageReturn
-            }),
             '\'' if mode.in_single_quotes() => Err(EscapeError::EscapeOnlyChar),
             '"' if mode.in_double_quotes() => Err(EscapeError::EscapeOnlyChar),
             _ => {
@@ -158,7 +164,7 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
 
         'u' => {
             if chars.next() != Some('{') {
-                return Err(EscapeError::InvalidUnicodeEscape);
+                return Err(EscapeError::NoBraceInUnicodeEscape);
             }
 
             let mut n_digits = 1;
@@ -205,6 +211,15 @@ fn scan_escape(first_char: char, chars: &mut Chars<'_>, mode: Mode) -> Result<ch
     Ok(res)
 }
 
+fn unescape_char_or_byte(chars: &mut Chars<'_>, mode: Mode) -> Result<char, EscapeError> {
+    let first_char = chars.next().ok_or(EscapeError::ZeroChars)?;
+    let res = scan_escape(first_char, chars, mode)?;
+    if chars.next().is_some() {
+        return Err(EscapeError::MoreThanOneChar);
+    }
+    Ok(res)
+}
+
 /// Takes a contents of a string literal (without quotes) and produces a
 /// sequence of escaped characters or errors.
 fn unescape_str_or_byte_str<F>(src: &str, mode: Mode, callback: &mut F)
@@ -219,25 +234,13 @@ where
 
         let unescaped_char = match first_char {
             '\\' => {
-                let (second_char, third_char) = {
-                    let mut chars = chars.clone();
-                    (chars.next(), chars.next())
-                };
-                match (second_char, third_char) {
-                    (Some('\n'), _) | (Some('\r'), Some('\n')) => {
+                let second_char = chars.clone().next();
+                match second_char {
+                    Some('\n') => {
                         skip_ascii_whitespace(&mut chars);
                         continue;
                     }
                     _ => scan_escape(first_char, &mut chars, mode),
-                }
-            }
-            '\r' => {
-                let second_char = chars.clone().next();
-                if second_char == Some('\n') {
-                    chars.next();
-                    Ok('\n')
-                } else {
-                    scan_escape(first_char, &mut chars, mode)
                 }
             }
             '\n' => Ok('\n'),
@@ -258,9 +261,35 @@ where
     }
 }
 
+/// Takes a contents of a string literal (without quotes) and produces a
+/// sequence of characters or errors.
+/// NOTE: Raw strings do not perform any explicit character escaping, here we
+/// only translate CRLF to LF and produce errors on bare CR.
+fn unescape_raw_str_or_byte_str<F>(literal_text: &str, mode: Mode, callback: &mut F)
+where
+    F: FnMut(Range<usize>, Result<char, EscapeError>),
+{
+    assert!(mode.in_double_quotes());
+    let initial_len = literal_text.len();
+
+    let mut chars = literal_text.chars();
+    while let Some(curr) = chars.next() {
+        let start = initial_len - chars.as_str().len() - curr.len_utf8();
+
+        let result = if mode.is_bytes() && !curr.is_ascii() {
+            Err(EscapeError::NonAsciiCharInByteString)
+        } else {
+            Ok(curr)
+        };
+        let end = initial_len - chars.as_str().len();
+
+        callback(start..end, result);
+    }
+}
+
 fn byte_from_char(c: char) -> u8 {
     let res = c as u32;
-    assert!(res <= u8::max_value() as u32, "guaranteed because of Mode::Byte");
+    assert!(res <= u8::max_value() as u32, "guaranteed because of Mode::Byte(Str)");
     res as u8
 }
 
@@ -283,10 +312,8 @@ mod tests {
         check(r"\", EscapeError::LoneSlash);
 
         check("\n", EscapeError::EscapeOnlyChar);
-        check("\r\n", EscapeError::EscapeOnlyChar);
         check("\t", EscapeError::EscapeOnlyChar);
         check("'", EscapeError::EscapeOnlyChar);
-        check("\r", EscapeError::BareCarriageReturn);
 
         check("spam", EscapeError::MoreThanOneChar);
         check(r"\x0ff", EscapeError::MoreThanOneChar);
@@ -299,6 +326,7 @@ mod tests {
         check(r"\0a", EscapeError::MoreThanOneChar);
         check(r"\u{0}x", EscapeError::MoreThanOneChar);
         check(r"\u{1F63b}}", EscapeError::MoreThanOneChar);
+        check("\r\n", EscapeError::MoreThanOneChar);
 
         check(r"\v", EscapeError::InvalidEscape);
         check(r"\💩", EscapeError::InvalidEscape);
@@ -316,8 +344,8 @@ mod tests {
         check(r"\xFF", EscapeError::OutOfRangeHexEscape);
         check(r"\x80", EscapeError::OutOfRangeHexEscape);
 
-        check(r"\u", EscapeError::InvalidUnicodeEscape);
-        check(r"\u[0123]", EscapeError::InvalidUnicodeEscape);
+        check(r"\u", EscapeError::NoBraceInUnicodeEscape);
+        check(r"\u[0123]", EscapeError::NoBraceInUnicodeEscape);
         check(r"\u{0x}", EscapeError::InvalidCharInUnicodeEscape);
         check(r"\u{", EscapeError::UnclosedUnicodeEscape);
         check(r"\u{0000", EscapeError::UnclosedUnicodeEscape);
@@ -347,6 +375,7 @@ mod tests {
         check("a", 'a');
         check("ы", 'ы');
         check("🦀", '🦀');
+        check("\r", '\r');
 
         check(r#"\""#, '"');
         check(r"\n", '\n');
@@ -388,10 +417,9 @@ mod tests {
 
         check("foo", "foo");
         check("", "");
-        check(" \t\n\r\n", " \t\n\n");
+        check(" \t\n", " \t\n");
 
         check("hello \\\n     world", "hello world");
-        check("hello \\\r\n     world", "hello world");
         check("thread's", "thread's")
     }
 
@@ -406,10 +434,8 @@ mod tests {
         check(r"\", EscapeError::LoneSlash);
 
         check("\n", EscapeError::EscapeOnlyChar);
-        check("\r\n", EscapeError::EscapeOnlyChar);
         check("\t", EscapeError::EscapeOnlyChar);
         check("'", EscapeError::EscapeOnlyChar);
-        check("\r", EscapeError::BareCarriageReturn);
 
         check("spam", EscapeError::MoreThanOneChar);
         check(r"\x0ff", EscapeError::MoreThanOneChar);
@@ -420,6 +446,7 @@ mod tests {
         check(r"\\a", EscapeError::MoreThanOneChar);
         check(r"\'a", EscapeError::MoreThanOneChar);
         check(r"\0a", EscapeError::MoreThanOneChar);
+        check("\r\n", EscapeError::MoreThanOneChar);
 
         check(r"\v", EscapeError::InvalidEscape);
         check(r"\💩", EscapeError::InvalidEscape);
@@ -434,8 +461,8 @@ mod tests {
         check(r"\x🦀", EscapeError::InvalidCharInHexEscape);
         check(r"\xtt", EscapeError::InvalidCharInHexEscape);
 
-        check(r"\u", EscapeError::InvalidUnicodeEscape);
-        check(r"\u[0123]", EscapeError::InvalidUnicodeEscape);
+        check(r"\u", EscapeError::NoBraceInUnicodeEscape);
+        check(r"\u[0123]", EscapeError::NoBraceInUnicodeEscape);
         check(r"\u{0x}", EscapeError::InvalidCharInUnicodeEscape);
         check(r"\u{", EscapeError::UnclosedUnicodeEscape);
         check(r"\u{0000", EscapeError::UnclosedUnicodeEscape);
@@ -474,6 +501,7 @@ mod tests {
         }
 
         check("a", b'a');
+        check("\r", b'\r');
 
         check(r#"\""#, b'"');
         check(r"\n", b'\n');
@@ -510,10 +538,39 @@ mod tests {
 
         check("foo", b"foo");
         check("", b"");
-        check(" \t\n\r\n", b" \t\n\n");
+        check(" \t\n", b" \t\n");
 
         check("hello \\\n     world", b"hello world");
-        check("hello \\\r\n     world", b"hello world");
         check("thread's", b"thread's")
+    }
+
+    #[test]
+    fn test_unescape_raw_str() {
+        fn check(literal: &str, expected: &[(Range<usize>, Result<char, EscapeError>)]) {
+            let mut unescaped = Vec::with_capacity(literal.len());
+            unescape_raw_str(literal, &mut |range, res| unescaped.push((range, res)));
+            assert_eq!(unescaped, expected);
+        }
+
+        check("\r\n", &[(0..1, Ok('\r')), (1..2, Ok('\n'))]);
+        check("\r", &[(0..1, Ok('\r'))]);
+        check("\rx", &[(0..1, Ok('\r')), (1..2, Ok('x'))]);
+    }
+
+    #[test]
+    fn test_unescape_raw_byte_str() {
+        fn check(literal: &str, expected: &[(Range<usize>, Result<u8, EscapeError>)]) {
+            let mut unescaped = Vec::with_capacity(literal.len());
+            unescape_raw_byte_str(literal, &mut |range, res| unescaped.push((range, res)));
+            assert_eq!(unescaped, expected);
+        }
+
+        check("\r\n", &[(0..1, Ok(b'\r')), (1..2, Ok(b'\n'))]);
+        check("\r", &[(0..1, Ok(b'\r'))]);
+        check("🦀", &[(0..4, Err(EscapeError::NonAsciiCharInByteString))]);
+        check(
+            "🦀a",
+            &[(0..4, Err(EscapeError::NonAsciiCharInByteString)), (4..5, Ok(byte_from_char('a')))],
+        );
     }
 }
